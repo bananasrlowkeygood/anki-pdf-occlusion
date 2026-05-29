@@ -11,10 +11,6 @@ Open any PDF, draw boxes over what you want to memorize, and generate cards in b
 | | |
 |---|---|
 | **Anki version** | 2.1.50 or later |
-| **Dependencies** | None — PyMuPDF is bundled |
-| **Compatibility** | Runs alongside Image Occlusion Enhanced without conflicts |
-| **Note type** | Created automatically on first use |
-
 ---
 
 ## How It Works
