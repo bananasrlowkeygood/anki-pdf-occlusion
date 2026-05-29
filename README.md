@@ -1,75 +1,88 @@
-# anki-pdf-occlusion
+# PDF Image Occlusion
 
-Create image occlusion cards directly from PDF lecture slides — no more importing one image at a time.
+> Create image occlusion cards directly from PDF lecture slides — no more importing one image at a time.
 
-Open a PDF, draw occlusion boxes over the content you want to memorize, and generate cards in bulk. Supports grouping boxes, hide-all and hide-one modes, zoom, and per-slide skip. Each card uses an SVG overlay so the box disappears cleanly on the answer side without swapping images.
+Open any PDF, draw boxes over what you want to memorize, and generate cards in bulk. Built for studying from slide-heavy lectures.
 
-## Features
+---
 
-- Open any PDF — each page renders as a slide
-- Draw, move, and resize occlusion boxes by dragging
-- Group boxes together (one card masks all boxes in the group)
-- Hide All / Hide One mode (like Image Occlusion Enhanced)
-- Zoom in/out for precise box placement
-- Skip slides you don't need
-- Lecture name auto-filled from filename, editable
-- Header shows lecture name + slide number on every card
-- Appears as a toolbar button in the card editor (`Ctrl+Shift+P`)
-- Media files auto-cleaned when cards are deleted
-- Configurable mask color, DPI, deck, and more via the built-in config
+## Overview
+
+| | |
+|---|---|
+| **Anki version** | 2.1.50 or later |
+| **Dependencies** | None — PyMuPDF is bundled |
+| **Compatibility** | Runs alongside Image Occlusion Enhanced without conflicts |
+| **Note type** | Created automatically on first use |
+
+---
+
+## How It Works
+
+**1. Open the dialog**
+Go to `Tools → PDF Image Occlusion`, or use the toolbar button in the card editor.
+
+**2. Load a PDF**
+Every page renders as a slide preview.
+
+**3. Draw occlusion boxes**
+Click and drag to place boxes over the content you want to memorize.
+
+**4. Group related boxes** *(optional)*
+Select multiple boxes and press `G` to group them into a single card region.
+
+**5. Skip slides you don't need**
+Press `Space` to mark a slide as skipped.
+
+**6. Generate cards**
+Click **Create All Cards** — done.
+
+---
 
 ## Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
-| `← →` | Navigate slides |
-| `Space` | Skip slide |
+| `←` / `→` | Navigate slides |
+| `Space` | Skip / unskip current slide |
 | `G` | Group selected boxes |
 | `U` | Ungroup |
-| `Del / Backspace` | Remove selected box(es) |
+| `Del` / `Backspace` | Remove selected box(es) |
 | `Ctrl+A` | Select all boxes on slide |
 | `Ctrl+Shift+P` | Open from card editor |
+| `Ctrl+` / `Ctrl-` | Zoom in / out |
 
-## Installation
-
-### From AnkiWeb
-Search for **PDF Image Occlusion** in `Tools → Add-ons → Get Add-ons`.
-
-### Manual
-1. Clone this repo
-2. Copy the folder into your Anki addons directory:
-   ```
-   ~/Library/Application Support/Anki2/addons21/pdf_image_occlusion/
-   ```
-3. Install the `PyMuPDF` dependency into `vendor/`:
-   ```
-   pip install PyMuPDF --target vendor/
-   ```
-4. Restart Anki
+---
 
 ## Configuration
 
-Go to `Tools → Add-ons → PDF Image Occlusion → Config`:
+`Tools → Add-ons → PDF Image Occlusion → Config`
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `default_zoom` | `1.0` | Starting zoom when a PDF opens |
-| `render_dpi_scale` | `1.0` | PDF render quality (`2.0` = sharper) |
-| `mask_color` | `[46, 120, 217]` | RGB color of occlusion boxes on cards |
-| `occlusion_mode` | `"ao"` | `"ao"` = Hide All Show One, `"oa"` = Hide One Show One |
-| `add_editor_button` | `true` | Show toolbar button in card editor |
-| `close_after_creating` | `true` | Close dialog after creating cards |
-| `note_type_name` | `"PDF Image Occlusion"` | Note type name |
-| `default_deck` | `""` | Force a specific deck (empty = use active deck) |
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `occlusion_mode` | `string` | `"ao"` | `"ao"` = Hide All, Show One · `"oa"` = Hide One, Show One |
+| `mask_color` | RGB | — | Color of the occlusion box on cards |
+| `render_dpi_scale` | `float` | `1.0` | Set to `2.0` for sharper rendering on high-DPI screens |
+| `default_zoom` | `float` | — | Starting zoom level when a PDF opens |
+| `default_deck` | `string` | — | Route new cards to a specific deck by name |
+| `add_editor_button` | `bool` | `true` | Show or hide the toolbar button in the card editor |
 
-## Dependencies
+---
 
-[PyMuPDF](https://pymupdf.readthedocs.io/) is used for PDF rendering. It must be installed into the `vendor/` folder (not included in the repo due to binary size).
+## Notes
 
-## Inspired By
+- PyMuPDF is bundled — no separate install required
+- A **PDF Image Occlusion** note type is created automatically on first use
+- Compatible with [Image Occlusion Enhanced](https://github.com/glutanimate/image-occlusion-enhanced) — both add-ons can run in the same profile
 
-[Image Occlusion Enhanced](https://github.com/glutanimate/image-occlusion-enhanced) by Glutanimate.
+---
 
-## License
+## Credits
 
-MIT
+Inspired by [Image Occlusion Enhanced](https://github.com/glutanimate/image-occlusion-enhanced) by [Glutanimate](https://github.com/glutanimate).
+
+---
+
+## Links
+
+- **Source & bug reports:** [github.com/bananasrlowkeygood/anki-pdf-occlusion](https://github.com/bananasrlowkeygood/anki-pdf-occlusion)
