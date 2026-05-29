@@ -117,6 +117,9 @@ def ensure_note_type(col: Collection, name: str = "PDF Image Occlusion") -> Note
     nt = mm.by_name(name)
     if nt:
         nt["css"] = _CSS
+        for tmpl in nt["tmpls"]:
+            tmpl["qfmt"] = _FRONT_TMPL
+            tmpl["afmt"] = _BACK_TMPL
         mm.save(nt)
         return nt
 
