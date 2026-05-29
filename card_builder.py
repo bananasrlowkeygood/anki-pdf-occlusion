@@ -40,9 +40,25 @@ _BACK_TMPL = """\
 (function(){
   var a = "{{Answer Mask}}".replace(/&amp;/g,"&");
   document.getElementById("io-overlay").src = a;
+  window._ioAnswerMask = a;
+  window._ioAllHidden = false;
 })();
 </script>
-<div id="io-extra">{{Remarks}}</div>"""
+<div id="io-extra">{{Remarks}}</div>
+<div id="io-toggle-bar">
+  <button id="io-toggle-btn" onclick="
+    var el = document.getElementById('io-overlay');
+    if (window._ioAllHidden) {
+      el.src = window._ioAnswerMask;
+      window._ioAllHidden = false;
+      this.textContent = 'Show All';
+    } else {
+      el.src = 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22/>';
+      window._ioAllHidden = true;
+      this.textContent = 'Hide All';
+    }
+  ">Show All</button>
+</div>"""
 
 _CSS = """\
 .card {
@@ -76,6 +92,23 @@ _CSS = """\
 #io-extra {
   margin-top: 10px;
   font-size: 13px;
+}
+#io-toggle-bar {
+  margin-top: 10px;
+  text-align: center;
+}
+#io-toggle-btn {
+  background: #4a90d9;
+  color: white;
+  font-weight: bold;
+  font-size: 13px;
+  padding: 6px 20px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+#io-toggle-btn:hover {
+  background: #357abd;
 }"""
 
 
