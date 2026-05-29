@@ -129,6 +129,10 @@ def _color_str(color: tuple) -> str:
     return f"rgb({color[0]},{color[1]},{color[2]})"
 
 
+# Distinct highlight color for the box currently being tested
+_HIGHLIGHT_COLOR = (255, 140, 0)
+
+
 def _make_masks(
     W: int, H: int,
     active: list[dict],
@@ -143,23 +147,28 @@ def _make_masks(
     all_boxes – every box on this slide
     """
     c = _color_str(color)
+    h = _color_str(_HIGHLIGHT_COLOR)
     non_active = [b for b in all_boxes if b not in active]
+    multiple = len(all_boxes) > 1
 
     if mode == "ao":
-        # ── Front: ALL boxes fully opaque ───────────────────────────────
-        q_rects = [_rect(b, c, 1.0) for b in all_boxes]
+        # ── Front: non-active boxes opaque; active highlighted when multiple ─
+        q_rects = [_rect(b, c, 1.0) for b in non_active]
+        if multiple:
+            q_rects += [_rect(b, h, 1.0) for b in active]
+        else:
+            q_rects += [_rect(b, c, 1.0) for b in active]
 
-        # ── Back: non-active stay opaque; active becomes a faint outline ─
+        # ── Back: non-active stay opaque; active disappears completely ───────
         a_rects = [_rect(b, c, 1.0) for b in non_active]
-        a_rects += [_rect(b, "none", 0, c, 0.4, 2) for b in active]
 
     else:  # oa
-        # ── Front: only active opaque; others as faint outlines ──────────
+        # ── Front: only active opaque; others as faint outlines ──────────────
         q_rects  = [_rect(b, c, 0.15, c, 0.5, 2) for b in non_active]
         q_rects += [_rect(b, c, 1.0)              for b in active]
 
-        # ── Back: all boxes become faint outlines (active disappears) ────
-        a_rects = [_rect(b, "none", 0, c, 0.35, 1.5) for b in all_boxes]
+        # ── Back: all boxes disappear completely (no outlines) ───────────────
+        a_rects = []
 
     return _svg(W, H, q_rects), _svg(W, H, a_rects)
 
