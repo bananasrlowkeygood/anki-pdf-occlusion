@@ -1,0 +1,6 @@
+{
+    "package": "pdf_image_occlusion",
+    "name": "PDF Image Occlusion",
+    "mod": 1,
+    "min_point_version": 231000
+}

@@ -1,0 +1,11 @@
+{
+    "default_zoom": 1.0,
+    "render_dpi_scale": 1.0,
+    "mask_color": [46, 120, 217],
+    "mask_opacity": 200,
+    "add_editor_button": true,
+    "close_after_creating": true,
+    "note_type_name": "PDF Image Occlusion",
+    "default_deck": "",
+    "occlusion_mode": "ao"
+}

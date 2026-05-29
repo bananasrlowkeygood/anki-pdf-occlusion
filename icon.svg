@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 28 28" width="28" height="28">
+  <style>
+    .page  { fill: none; stroke: #1a1a1a; stroke-opacity: 0.75; }
+    .line  { stroke: #1a1a1a; stroke-opacity: 0.3; }
+    .badge { fill: #F2A900; }
+    .cross { stroke: #1a1a1a; stroke-opacity: 0.8; }
+    .box   { fill: #F2A900; }
+    @media (prefers-color-scheme: dark) {
+      .page  { stroke: #e0e0e0; stroke-opacity: 0.75; }
+      .line  { stroke: #e0e0e0; stroke-opacity: 0.3; }
+      .badge { fill: #F2A900; }
+      .cross { stroke: #1a1a1a; stroke-opacity: 0.85; }
+      .box   { fill: #F2A900; }
+    }
+  </style>
+  <rect  class="page" x="3" y="1" width="16" height="22" rx="2" stroke-width="1.4"/>
+  <line  class="line" x1="6" y1="6"  x2="16" y2="6"  stroke-width="1"/>
+  <line  class="line" x1="6" y1="9"  x2="16" y2="9"  stroke-width="1"/>
+  <line  class="line" x1="6" y1="12" x2="13" y2="12" stroke-width="1"/>
+  <rect  class="box"  x="10" y="14" width="8" height="6" rx="1"/>
+  <circle class="badge" cx="22" cy="22" r="6"/>
+  <line  class="cross" x1="22" y1="19" x2="22" y2="25" stroke-width="2.2" stroke-linecap="round"/>
+  <line  class="cross" x1="19" y1="22" x2="25" y2="22" stroke-width="2.2" stroke-linecap="round"/>
+</svg>
