@@ -1,25 +1,10 @@
-import sys
 import os
-import platform
 import re
 from typing import Sequence
 
+from .pdf_renderer import ensure_vendor_on_path
 
-def _platform_tag() -> str:
-    machine = platform.machine().lower()
-    if sys.platform == "darwin":
-        return "mac_arm64" if machine == "arm64" else "mac_x86_64"
-    if sys.platform.startswith("win"):
-        return "win_arm64" if machine in ("arm64", "aarch64") else "win_amd64"
-    return "linux_aarch64" if machine in ("arm64", "aarch64") else "linux_x86_64"
-
-
-# Vendored deps live in vendor/<platform>/ — pypdfium2 ships a separate
-# binary per OS/arch, so the right one is picked at import time.
-_vendor_root = os.path.join(os.path.dirname(__file__), "vendor")
-for p in (os.path.join(_vendor_root, _platform_tag()), _vendor_root):
-    if os.path.isdir(p) and p not in sys.path:
-        sys.path.insert(0, p)
+ensure_vendor_on_path()
 
 from aqt import mw, gui_hooks
 from aqt.qt import QAction, QTimer

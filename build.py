@@ -26,6 +26,7 @@ PLATFORMS = {
     "mac_arm64": "macosx_11_0_arm64",
     "mac_x86_64": "macosx_10_13_x86_64",
     "win_amd64": "win_amd64",
+    "win_arm64": "win_arm64",
     "linux_x86_64": "manylinux_2_17_x86_64",
     "linux_aarch64": "manylinux_2_17_aarch64",
 }
