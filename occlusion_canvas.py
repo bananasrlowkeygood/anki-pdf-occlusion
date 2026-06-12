@@ -13,8 +13,6 @@ Grouping:
 """
 from typing import Optional
 
-import fitz  # PyMuPDF
-
 from aqt.qt import (
     QWidget, QPainter, QPen, QColor, QRect, QPoint, QPointF,
     QPixmap, QImage, Qt, QCursor, QMenu, QAction, QKeyEvent,
@@ -51,9 +49,7 @@ def _group_color(gid: int, selected: bool, alpha: int = 160) -> QColor:
     return QColor(r, g, b, alpha)
 
 
-def _pix_to_qpixmap(pix: fitz.Pixmap) -> QPixmap:
-    fmt = QImage.Format.Format_RGBA8888 if pix.n == 4 else QImage.Format.Format_RGB888
-    img = QImage(pix.samples, pix.width, pix.height, pix.stride, fmt)
+def _pix_to_qpixmap(img: QImage) -> QPixmap:
     return QPixmap.fromImage(img)
 
 
@@ -109,6 +105,7 @@ class OcclusionCanvas(QWidget):
         self._orig_w = 0
         self._orig_h = 0
         self._zoom: float = 1.0
+        self._render_scale: float = 1.0
         self._boxes: list[_Box] = []
         self._selected: set[_Box] = set()
         self._next_gid: int = 0   # monotonic group-id counter
@@ -130,10 +127,11 @@ class OcclusionCanvas(QWidget):
     def has_image(self) -> bool:
         return self._pixmap is not None
 
-    def set_image(self, pix: fitz.Pixmap, boxes: list[dict]):
-        self._pixmap = _pix_to_qpixmap(pix)
-        self._orig_w = pix.width
-        self._orig_h = pix.height
+    def set_image(self, img: QImage, boxes: list[dict], render_scale: float = 1.0):
+        self._pixmap = _pix_to_qpixmap(img)
+        self._orig_w = img.width()
+        self._orig_h = img.height()
+        self._render_scale = max(render_scale, 0.01)
         self._boxes = [_Box.from_dict(d) for d in boxes]
         self._selected = set()
         # keep _next_gid monotonic across slides so IDs never collide
@@ -184,29 +182,37 @@ class OcclusionCanvas(QWidget):
 
     # ---------------------------------------------------------------- private
 
+    @property
+    def _disp(self) -> float:
+        # Display scale: image pixels → screen. Pages are rendered at
+        # _render_scale× resolution for sharpness, so 100% zoom shows the
+        # page at its natural size, drawn from the higher-res pixels.
+        return self._zoom / self._render_scale
+
     def _apply_size(self):
         if self._pixmap:
-            self.setFixedSize(int(self._orig_w * self._zoom),
-                              int(self._orig_h * self._zoom))
+            self.setFixedSize(int(self._orig_w * self._disp),
+                              int(self._orig_h * self._disp))
 
     def _to_img(self, spos: QPoint) -> QPointF:
-        return QPointF(spos.x() / self._zoom, spos.y() / self._zoom)
+        return QPointF(spos.x() / self._disp, spos.y() / self._disp)
 
     # ----------------------------------------------------------------- paint
 
     def paintEvent(self, _event):
         p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
         if self._pixmap:
             p.drawPixmap(
-                QRect(0, 0, int(self._orig_w * self._zoom),
-                      int(self._orig_h * self._zoom)),
+                QRect(0, 0, int(self._orig_w * self._disp),
+                      int(self._orig_h * self._disp)),
                 self._pixmap,
             )
 
         for box in self._boxes:
             sel = box in self._selected
-            r = box.screen_rect(self._zoom)
+            r = box.screen_rect(self._disp)
 
             if box.group is not None:
                 fill = _group_color(box.group, sel, alpha=160)
@@ -228,7 +234,7 @@ class OcclusionCanvas(QWidget):
                            f"G{box.group + 1}")
 
             # resize handle
-            h = box.handle_rect(self._zoom)
+            h = box.handle_rect(self._disp)
             p.fillRect(h, _HANDLE_COLOR)
             p.setPen(border)
             p.drawRect(h)
@@ -238,7 +244,7 @@ class OcclusionCanvas(QWidget):
             tmp = _Box(self._drag_start.x(), self._drag_start.y(),
                        self._drag_current.x() - self._drag_start.x(),
                        self._drag_current.y() - self._drag_start.y())
-            r = tmp.screen_rect(self._zoom)
+            r = tmp.screen_rect(self._disp)
             p.fillRect(r, _UNGROUPED_FILL)
             p.setPen(QPen(_UNGROUPED_BORDER, 1.5))
             p.drawRect(r)
@@ -262,7 +268,7 @@ class OcclusionCanvas(QWidget):
 
         # resize handle?
         for box in reversed(self._boxes):
-            if box.handle_rect(self._zoom).contains(spos):
+            if box.handle_rect(self._disp).contains(spos):
                 self._resizing = box
                 if not shift:
                     self._selected = {box}
@@ -273,7 +279,7 @@ class OcclusionCanvas(QWidget):
 
         # click inside a box?
         for box in reversed(self._boxes):
-            if box.contains_screen(spos.x(), spos.y(), self._zoom):
+            if box.contains_screen(spos.x(), spos.y(), self._disp):
                 if shift:
                     if box in self._selected:
                         self._selected.discard(box)
@@ -337,10 +343,10 @@ class OcclusionCanvas(QWidget):
 
         # cursor hints
         for box in reversed(self._boxes):
-            if box.handle_rect(self._zoom).contains(spos):
+            if box.handle_rect(self._disp).contains(spos):
                 self.setCursor(QCursor(Qt.CursorShape.SizeFDiagCursor))
                 return
-            if box.contains_screen(spos.x(), spos.y(), self._zoom):
+            if box.contains_screen(spos.x(), spos.y(), self._disp):
                 self.setCursor(QCursor(Qt.CursorShape.SizeAllCursor))
                 return
         self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
@@ -409,7 +415,7 @@ class OcclusionCanvas(QWidget):
         # find clicked box
         clicked = None
         for box in reversed(self._boxes):
-            if box.contains_screen(spos.x(), spos.y(), self._zoom):
+            if box.contains_screen(spos.x(), spos.y(), self._disp):
                 clicked = box
                 break
 

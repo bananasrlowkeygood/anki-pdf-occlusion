@@ -1,11 +1,25 @@
 import sys
 import os
+import platform
 import re
 from typing import Sequence
 
-vendor_path = os.path.join(os.path.dirname(__file__), "vendor")
-if vendor_path not in sys.path:
-    sys.path.insert(0, vendor_path)
+
+def _platform_tag() -> str:
+    machine = platform.machine().lower()
+    if sys.platform == "darwin":
+        return "mac_arm64" if machine == "arm64" else "mac_x86_64"
+    if sys.platform.startswith("win"):
+        return "win_arm64" if machine in ("arm64", "aarch64") else "win_amd64"
+    return "linux_aarch64" if machine in ("arm64", "aarch64") else "linux_x86_64"
+
+
+# Vendored deps live in vendor/<platform>/ — pypdfium2 ships a separate
+# binary per OS/arch, so the right one is picked at import time.
+_vendor_root = os.path.join(os.path.dirname(__file__), "vendor")
+for p in (os.path.join(_vendor_root, _platform_tag()), _vendor_root):
+    if os.path.isdir(p) and p not in sys.path:
+        sys.path.insert(0, p)
 
 from aqt import mw, gui_hooks
 from aqt.qt import QAction, QTimer
@@ -23,7 +37,7 @@ def open_pdf_occlusion(editor: Editor = None):
 
 
 # ── Tools menu entry ──────────────────────────────────────────────────────────
-action = QAction("PDF Image Occlusion", mw)
+action = QAction("PDF Occlusion", mw)
 action.triggered.connect(lambda: open_pdf_occlusion())
 mw.form.menuTools.addAction(action)
 
@@ -35,9 +49,9 @@ def _add_editor_button(buttons: list, editor: Editor) -> None:
     icon_path = os.path.join(os.path.dirname(__file__), "icon.svg")
     btn = editor.addButton(
         icon=icon_path,
-        cmd="pdf_image_occlusion",
+        cmd="pdf_occlusion",
         func=lambda ed: open_pdf_occlusion(editor=ed),
-        tip="PDF Image Occlusion (Ctrl+Shift+P)",
+        tip="PDF Occlusion (Ctrl+Shift+P)",
         keys="ctrl+shift+p",
     )
     buttons.append(btn)
@@ -66,17 +80,22 @@ _pending: set[str] = set()
 
 def _on_notes_will_be_deleted(col, ids: Sequence) -> None:
     cfg = _get_config()
-    note_type_name = cfg.get("note_type_name", "PDF Image Occlusion")
-    nt = col.models.by_name(note_type_name)
-    if not nt:
+    note_type_name = cfg.get("note_type_name", "PDF Occlusion")
+    # "PDF Image Occlusion" was the note type name before the add-on was
+    # renamed — keep matching it so cleanup still works for older cards.
+    nt_ids = {
+        nt["id"]
+        for name in {note_type_name, "PDF Image Occlusion"}
+        if (nt := col.models.by_name(name))
+    }
+    if not nt_ids:
         return
-    nt_id = nt["id"]
 
     candidates: set[str] = set()
     for nid in ids:
         try:
             note = col.get_note(nid)
-            if note.mid != nt_id:
+            if note.mid not in nt_ids:
                 continue
             for val in note.fields:
                 candidates.update(_FNAME_RE.findall(val))

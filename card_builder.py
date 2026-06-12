@@ -16,10 +16,12 @@ oa  (Hide One, Show One)
 """
 import uuid
 
-import fitz  # PyMuPDF
+from aqt.qt import QImage
 
 from anki.collection import Collection
 from anki.models import NotetypeDict
+
+from .pdf_renderer import qimage_to_png_bytes
 
 
 _MEDIA_PREFIX = "pdf_occ_"
@@ -112,9 +114,16 @@ _CSS = """\
 }"""
 
 
-def ensure_note_type(col: Collection, name: str = "PDF Image Occlusion") -> NotetypeDict:
+def ensure_note_type(col: Collection, name: str = "PDF Occlusion") -> NotetypeDict:
     mm = col.models
     nt = mm.by_name(name)
+    # Migrate the pre-rename note type so existing cards keep working
+    if not nt and name == "PDF Occlusion":
+        old = mm.by_name("PDF Image Occlusion")
+        if old:
+            old["name"] = name
+            mm.save(old)
+            nt = old
     if nt:
         nt["css"] = _CSS
         for tmpl in nt["tmpls"]:
@@ -223,7 +232,7 @@ def create_occlusion_notes(
     col: Collection,
     deck_id: int,
     note_type: NotetypeDict,
-    pages: list[tuple[int, fitz.Pixmap, list[dict]]],
+    pages: list[tuple[int, QImage, list[dict]]],
     mask_color: tuple = (46, 120, 217),
     mask_opacity: int = 200,
     lecture_name: str = "",
@@ -232,13 +241,13 @@ def create_occlusion_notes(
 ) -> int:
     total_created = 0
 
-    for page_idx, pix, boxes in pages:
-        W, H = pix.width, pix.height
+    for page_idx, img, boxes in pages:
+        W, H = img.width(), img.height()
 
         slide_label = f"Slide {page_idx + 1}/{total_slides}" if total_slides else f"Slide {page_idx + 1}"
         header_prefix = f"{lecture_name} · {slide_label}" if lecture_name else slide_label
 
-        img_fname = _save_media(col, pix.tobytes("png"), ".png")
+        img_fname = _save_media(col, qimage_to_png_bytes(img), ".png")
 
         ungrouped = [b for b in boxes if b.get("group") is None]
         grouped: dict[int, list[dict]] = {}

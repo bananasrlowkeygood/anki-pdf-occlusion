@@ -1,17 +1,16 @@
 import os
 from typing import Optional
 
-import fitz  # PyMuPDF
-
 from aqt import mw
 from aqt.qt import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit,
-    QComboBox, QFileDialog, QScrollArea, QShortcut, QKeySequence, Qt,
+    QComboBox, QFileDialog, QScrollArea, QShortcut, QKeySequence, Qt, QImage,
 )
 from aqt.utils import showInfo, showWarning
 
 from .occlusion_canvas import OcclusionCanvas
 from .card_builder import ensure_note_type, create_occlusion_notes
+from .pdf_renderer import render_pdf
 
 
 _ZOOM_STEPS = [0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
@@ -26,10 +25,11 @@ class PDFOcclusionDialog(QDialog):
     def __init__(self, parent=None, editor=None):
         super().__init__(parent)
         self._editor = editor
-        self.setWindowTitle("PDF Image Occlusion")
+        self.setWindowTitle("PDF Occlusion")
         self.resize(1100, 860)
 
-        self._pages: list[fitz.Pixmap] = []
+        self._pages: list[QImage] = []
+        self._render_scale: float = 1.0
         self._page_index: int = 0
         self._skipped: set[int] = set()
         self._boxes: dict[int, list[dict]] = {}
@@ -187,11 +187,8 @@ class PDFOcclusionDialog(QDialog):
             stem = os.path.splitext(os.path.basename(path))[0]
             self._lecture_edit.setText(stem)
 
-        scale = float(_cfg("render_dpi_scale", 1.0))
-        mat = fitz.Matrix(scale, scale)
-        doc = fitz.open(path)
-        self._pages = [page.get_pixmap(matrix=mat) for page in doc]
-        doc.close()
+        self._render_scale = float(_cfg("render_dpi_scale", 2.0))
+        self._pages = render_pdf(path, scale=self._render_scale)
 
         self._page_index = 0
         self._skipped.clear()
@@ -226,6 +223,7 @@ class PDFOcclusionDialog(QDialog):
         self._canvas.set_image(
             self._pages[self._page_index],
             self._boxes.get(self._page_index, []),
+            render_scale=self._render_scale,
         )
         self._update_controls()
         self._refresh_group_status()
@@ -318,7 +316,7 @@ class PDFOcclusionDialog(QDialog):
         deck_name = _cfg("default_deck", "")
         deck_id = mw.col.decks.id(deck_name) if deck_name else mw.col.decks.selected()
 
-        note_type_name = _cfg("note_type_name", "PDF Image Occlusion")
+        note_type_name = _cfg("note_type_name", "PDF Occlusion")
         mask_color = tuple(_cfg("mask_color", [46, 120, 217]))
         mask_opacity = int(_cfg("mask_opacity", 200))
 
