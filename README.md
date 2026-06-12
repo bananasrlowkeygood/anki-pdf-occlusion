@@ -19,9 +19,9 @@
 
 ## Installation
 
-1. Install via Anki using the add-on code `783821131`.
+1. Install via Anki using the add-on code `783821131`
 
-2. Restart Anki.
+2. Restart Anki
 
 > [!NOTE]
 > The PDF rendering library ([pypdfium2](https://github.com/pypdfium2-team/pypdfium2)) is bundled for macOS (Apple Silicon and Intel), Windows (x64), and Linux (x64 and ARM). No separate install required, on any Anki Python version.
@@ -38,7 +38,7 @@
 
 5. Press `Space` to mark a slide as skipped.
 
-6. Click `Create All Cards`.
+6. Click `Create All Cards`
 
 ## Keyboard Shortcuts
 
