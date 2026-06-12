@@ -30,7 +30,7 @@
 
 1. Go to `Tools → PDF Occlusion`, or use the toolbar button in the card editor (`Ctrl+Shift+P`).
 
-2. Click **Open PDF**
+2. Click `Open PDF`
 
 3. Click and drag to place boxes over the content you want to memorize.
 
@@ -38,7 +38,7 @@
 
 5. Press `Space` to mark a slide as skipped.
 
-6. Click **Create All Cards**.
+6. Click `Create All Cards`.
 
 ## Keyboard Shortcuts
 
