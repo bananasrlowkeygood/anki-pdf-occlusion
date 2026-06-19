@@ -29,33 +29,64 @@ _MEDIA_PREFIX = "pdf_occ_"
 
 # ----------------------------------------------------------------- note type
 
+# Fields store the full <img> tag (so the Browse editor renders thumbnails like
+# Image Occlusion Enhanced). norm() wraps any older card that still holds a bare
+# filename, so both formats render. The answer mask is preloaded in #io-preload
+# so revealing the answer paints both layers from cache at once — no flash.
 _FRONT_TMPL = """\
 <div id="io-wrapper">
-  <img id="io-original" src="{{Image}}">
-  <img id="io-overlay"  src="{{Question Mask}}">
+  <div id="io-original">{{Image}}</div>
+  <div id="io-overlay">{{Question Mask}}</div>
 </div>
-<div id="io-header">{{Header}}</div>"""
-
-_BACK_TMPL = """\
-{{FrontSide}}
+<div id="io-header">{{Header}}</div>
+<div id="io-preload" aria-hidden="true">{{Answer Mask}}</div>
 <script>
 (function(){
-  var a = "{{Answer Mask}}".replace(/&amp;/g,"&");
-  document.getElementById("io-overlay").src = a;
-  window._ioAnswerMask = a;
+  function norm(id){
+    var b = document.getElementById(id);
+    if(b && !b.querySelector("img")){
+      var n = b.textContent.trim();
+      if(n) b.innerHTML = '<img src="'+n+'">';
+    }
+  }
+  norm("io-original"); norm("io-overlay"); norm("io-preload");
+})();
+</script>"""
+
+# The back shows the answer mask directly as the overlay — no JS src swap, and
+# nothing is hidden via JS, so a card can never get stuck blank (e.g. on mobile).
+_BACK_TMPL = """\
+<div id="io-wrapper">
+  <div id="io-original">{{Image}}</div>
+  <div id="io-overlay">{{Answer Mask}}</div>
+</div>
+<div id="io-header">{{Header}}</div>
+<script>
+(function(){
+  function norm(id){
+    var b = document.getElementById(id);
+    if(b && !b.querySelector("img")){
+      var n = b.textContent.trim();
+      if(n) b.innerHTML = '<img src="'+n+'">';
+    }
+  }
+  norm("io-original"); norm("io-overlay");
+  var img = document.querySelector("#io-overlay img");
+  window._ioAnswerMask = img ? img.getAttribute("src") : "";
   window._ioAllHidden = false;
 })();
 </script>
 <div id="io-extra">{{Remarks}}</div>
 <div id="io-toggle-bar">
   <button id="io-toggle-btn" onclick="
-    var el = document.getElementById('io-overlay');
+    var img = document.querySelector('#io-overlay img');
+    if (!img) return;
     if (window._ioAllHidden) {
-      el.src = window._ioAnswerMask;
+      img.src = window._ioAnswerMask;
       window._ioAllHidden = false;
       this.textContent = 'Show All';
     } else {
-      el.src = 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22/>';
+      img.src = 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22/>';
       window._ioAllHidden = true;
       this.textContent = 'Hide All';
     }
@@ -75,7 +106,7 @@ _CSS = """\
   display: inline-block;
   max-width: 100%;
 }
-#io-original {
+#io-original img {
   display: block;
   max-width: 100%;
   height: auto;
@@ -83,7 +114,19 @@ _CSS = """\
 #io-overlay {
   position: absolute;
   top: 0; left: 0;
-  width: 100%; height: 100%;
+  width: 100%;
+  pointer-events: none;
+}
+#io-overlay img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+#io-preload {
+  position: absolute;
+  width: 1px; height: 1px;
+  opacity: 0;
+  overflow: hidden;
   pointer-events: none;
 }
 #io-header {
@@ -114,6 +157,33 @@ _CSS = """\
 }"""
 
 
+_IMG_FIELDS = ("Image", "Question Mask", "Answer Mask")
+
+
+def _migrate_field_format(col: Collection, nt: NotetypeDict) -> None:
+    """Wrap bare-filename fields of existing notes in <img> tags.
+
+    Older cards stored just the media filename; the current templates and the
+    Browse editor expect a full <img> tag. This converts them in place and is
+    idempotent (fields already containing an <img> are left untouched).
+    """
+    updated = []
+    for nid in col.models.nids(nt):
+        note = col.get_note(nid)
+        changed = False
+        for f in _IMG_FIELDS:
+            if f not in note:
+                continue
+            v = note[f].strip()
+            if v and "<img" not in v.lower():
+                note[f] = f'<img src="{v}">'
+                changed = True
+        if changed:
+            updated.append(note)
+    if updated:
+        col.update_notes(updated)
+
+
 def ensure_note_type(col: Collection, name: str = "PDF Occlusion") -> NotetypeDict:
     mm = col.models
     nt = mm.by_name(name)
@@ -130,6 +200,7 @@ def ensure_note_type(col: Collection, name: str = "PDF Occlusion") -> NotetypeDi
             tmpl["qfmt"] = _FRONT_TMPL
             tmpl["afmt"] = _BACK_TMPL
         mm.save(nt)
+        _migrate_field_format(col, nt)
         return nt
 
     nt = mm.new(name)
@@ -194,15 +265,11 @@ def _make_masks(
     c = _color_str(color)
     h = _color_str(_HIGHLIGHT_COLOR)
     non_active = [b for b in all_boxes if b not in active]
-    multiple = len(all_boxes) > 1
 
     if mode == "ao":
-        # ── Front: non-active boxes opaque; active highlighted when multiple ─
+        # ── Front: non-active boxes opaque; active always highlighted ────────
         q_rects = [_rect(b, c, 1.0) for b in non_active]
-        if multiple:
-            q_rects += [_rect(b, h, 1.0) for b in active]
-        else:
-            q_rects += [_rect(b, c, 1.0) for b in active]
+        q_rects += [_rect(b, h, 1.0) for b in active]
 
         # ── Back: non-active stay opaque; active disappears completely ───────
         a_rects = [_rect(b, c, 1.0) for b in non_active]
@@ -263,9 +330,9 @@ def create_occlusion_notes(
             a_fname = _save_media(col, a_svg, ".svg")
 
             note = col.new_note(note_type)
-            note["Image"] = img_fname
-            note["Question Mask"] = q_fname
-            note["Answer Mask"] = a_fname
+            note["Image"] = f'<img src="{img_fname}">'
+            note["Question Mask"] = f'<img src="{q_fname}">'
+            note["Answer Mask"] = f'<img src="{a_fname}">'
             note["Header"] = header_prefix
             col.add_note(note, deck_id)
             total_created += 1
@@ -277,9 +344,9 @@ def create_occlusion_notes(
             a_fname = _save_media(col, a_svg, ".svg")
 
             note = col.new_note(note_type)
-            note["Image"] = img_fname
-            note["Question Mask"] = q_fname
-            note["Answer Mask"] = a_fname
+            note["Image"] = f'<img src="{img_fname}">'
+            note["Question Mask"] = f'<img src="{q_fname}">'
+            note["Answer Mask"] = f'<img src="{a_fname}">'
             note["Header"] = header_prefix
             col.add_note(note, deck_id)
             total_created += 1

@@ -27,6 +27,32 @@ action.triggered.connect(lambda: open_pdf_occlusion())
 mw.form.menuTools.addAction(action)
 
 
+def upgrade_existing_cards():
+    """Refresh the note type template/CSS and convert existing cards to the
+    current <img>-in-field format, without creating any new notes."""
+    from aqt.utils import showInfo
+    from .card_builder import ensure_note_type
+
+    cfg = _get_config()
+    name = cfg.get("note_type_name", "PDF Occlusion")
+    if not (mw.col.models.by_name(name) or mw.col.models.by_name("PDF Image Occlusion")):
+        showInfo("No PDF Occlusion note type was found in this collection.")
+        return
+
+    ensure_note_type(mw.col, name)
+    mw.reset()
+    showInfo(
+        "PDF Occlusion cards upgraded:\n"
+        "• templates and styling refreshed\n"
+        "• existing cards converted to image thumbnails"
+    )
+
+
+upgrade_action = QAction("Upgrade PDF Occlusion cards", mw)
+upgrade_action.triggered.connect(upgrade_existing_cards)
+mw.form.menuTools.addAction(upgrade_action)
+
+
 # ── Editor toolbar button ─────────────────────────────────────────────────────
 def _add_editor_button(buttons: list, editor: Editor) -> None:
     if not _get_config().get("add_editor_button", True):
