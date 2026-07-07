@@ -1,8 +1,9 @@
 {
-    "default_zoom": 1.0,
+    "default_zoom": "fit",
     "render_dpi_scale": 2.0,
-    "mask_color": [46, 120, 217],
-    "mask_opacity": 200,
+    "mask_color": [120, 120, 120],
+    "mask_opacity": 255,
+    "highlight_color": [131, 110, 170],
     "add_editor_button": true,
     "close_after_creating": true,
     "note_type_name": "PDF Occlusion",

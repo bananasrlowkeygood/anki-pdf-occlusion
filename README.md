@@ -1,19 +1,21 @@
 # <img alt="pdf-occlusion-icon" src="icon.svg" height="60"> ‎ ‎ ‎PDF Occlusion
 
-[![Anki](https://img.shields.io/badge/Anki-2.1.50%2B-4a90d9?style=flat-square)](https://apps.ankiweb.net)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-8e6bc8?style=flat-square)](https://github.com/bananasrlowkeygood/anki-pdf-occlusion)
-[![License](https://img.shields.io/badge/license-MIT-e8739e?style=flat-square)](LICENSE)
+[![Anki](https://img.shields.io/badge/Anki-23.10%2B-4E2A84?style=flat-square)](https://apps.ankiweb.net)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-836EAA?style=flat-square)](https://github.com/bananasrlowkeygood/anki-pdf-occlusion)
+[![License](https://img.shields.io/badge/license-MIT-B6ACD1?style=flat-square)](LICENSE)
 
 **PDF Occlusion** is an Anki add-on that creates image occlusion cards directly from PDF lecture slides. No more importing one image at a time. Open any PDF, draw boxes over what you want to memorize, and generate cards in bulk. Built for studying from slide-heavy lectures.
+
+Cards use the same flicker-free layered rendering as [Image Occlusion Enhanced](https://github.com/glutanimate/image-occlusion-enhanced): one shared slide image plus lightweight SVG mask overlays, with the slide kept hidden until the mask has painted — flipping a card never flashes the answer.
 
 ## Table of Contents
 
 - [1. Installation](#installation)
 - [2. Quick Start](#quick-start)
-- [3. Keyboard Shortcuts](#keyboard-shortcuts)
-- [4. Configuration](#configuration)
-- [5. Notes](#notes)
-- [6. Credits](#credits)
+- [3. Editing Tools](#editing-tools)
+- [4. Keyboard Shortcuts](#keyboard-shortcuts)
+- [5. Configuration](#configuration)
+- [6. Notes](#notes)
 - [7. Contact](#contact)
 - [8. License](#license)
 
@@ -38,20 +40,34 @@
 
 5. Press `Space` to mark a slide as skipped.
 
-6. Click `Create All Cards`
+6. Pick a deck (type a new name to create one), choose an occlusion mode, and click `Create All Cards`.
+
+## Editing Tools
+
+- **Draw** — drag on empty space
+- **Move** — drag a box (a multi-selection moves together)
+- **Resize** — drag any corner handle of a selected box
+- **Nudge** — arrow keys move selected boxes 1 px; `Shift` + arrows = 10 px
+- **Copy / paste** — `Ctrl+C` / `Ctrl+V`; the clipboard survives slide changes, so a repeating layout can be stamped onto every slide of a deck
+- **Undo / redo** — `Ctrl+Z` / `Ctrl+Shift+Z`, per slide
+- **Group** — `Shift`-click to multi-select, then `G`; each group becomes one card
 
 ## Keyboard Shortcuts
 
 | Key | Action |
 |-----|--------|
-| `←` / `→` | Navigate slides |
+| `←` / `→` | Navigate slides (nudge instead when boxes are selected) |
+| `PgUp` / `PgDn` | Navigate slides (always) |
 | `Space` | Skip / unskip current slide |
-| `G` | Group selected boxes |
-| `U` | Ungroup |
+| `G` / `U` | Group / ungroup selected boxes |
 | `Del` / `Backspace` | Remove selected box(es) |
 | `Ctrl+A` | Select all boxes on slide |
-| `Ctrl+Shift+P` | Open from card editor |
+| `Ctrl+C` / `Ctrl+V` | Copy / paste boxes (works across slides) |
+| `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo |
 | `Ctrl+` / `Ctrl-` | Zoom in / out |
+| `Ctrl+0` | Fit slide to window width |
+| `Esc` | Clear selection |
+| `Ctrl+Shift+P` | Open from card editor |
 
 ## Configuration
 
@@ -60,11 +76,12 @@
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `occlusion_mode` | `string` | `"ao"` | `"ao"` = Hide All, Show One · `"oa"` = Hide One, Show One |
-| `mask_color` | RGB | `[46, 120, 217]` | Color of the occlusion box on cards |
-| `mask_opacity` | int 0–255 | `200` | Opacity of the mask rectangle drawn on the card image |
+| `mask_color` | RGB | `[120, 120, 120]` | Color of boxes not being tested (neutral grey), on cards and in the editor |
+| `highlight_color` | RGB | `[131, 110, 170]` | Color of the box being tested (purple) |
+| `mask_opacity` | int 0–255 | `255` | Opacity of the mask rectangles on cards. 255 = fully opaque |
 | `render_dpi_scale` | `float` | `2.0` | Resolution multiplier for rendered pages — higher = sharper cards, more memory |
-| `default_zoom` | `float` | `1.0` | Starting zoom level when a PDF opens |
-| `default_deck` | `string` | `""` | Route new cards to a specific deck by name |
+| `default_zoom` | `"fit"` / `float` | `"fit"` | Zoom when a PDF opens; `"fit"` fills the window width |
+| `default_deck` | `string` | `""` | Deck preselected in the dialog's deck picker |
 | `note_type_name` | `string` | `"PDF Occlusion"` | Name of the note type to create/reuse |
 | `add_editor_button` | `bool` | `true` | Show or hide the toolbar button in the card editor |
 | `close_after_creating` | `bool` | `true` | Close the dialog automatically after cards are created |
@@ -72,6 +89,8 @@
 ## Notes
 
 - A **PDF Occlusion** note type is created automatically on first use.
+- Cards support Anki's night mode.
+- **After updating the add-on**, you'll be offered a one-time upgrade of your existing cards to the latest template (including the flicker fix). Skipping it is fine — templates are refreshed automatically the next time you create cards.
 - Media files are cleaned up automatically when the last card referencing a slide is deleted
 - Compatible with [Image Occlusion Enhanced](https://github.com/glutanimate/image-occlusion-enhanced) — both add-ons can run in the same profile
 

@@ -27,30 +27,70 @@ action.triggered.connect(lambda: open_pdf_occlusion())
 mw.form.menuTools.addAction(action)
 
 
-def upgrade_existing_cards():
-    """Refresh the note type template/CSS and convert existing cards to the
-    current <img>-in-field format, without creating any new notes."""
-    from aqt.utils import showInfo
+# ── One-time upgrade prompt after add-on updates ──────────────────────────────
+#
+# Card templates/CSS are stored in the user's collection, not in the add-on,
+# so updating the add-on does NOT touch existing cards. Bump TEMPLATE_VERSION
+# whenever the templates/CSS change in a way existing users should receive;
+# on the next profile load they get a one-time offer to apply it. Declining
+# is fine too — templates are refreshed anyway the next time cards are
+# created (ensure_note_type runs then).
+# The seen-version marker lives in user_files/ (preserved across add-on
+# updates) rather than in config, so config.json defaults stay live.
+
+TEMPLATE_VERSION = 2  # v2: flicker-free reveal + purple styling
+
+
+def _template_version_file() -> str:
+    d = os.path.join(os.path.dirname(__file__), "user_files")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "template_version")
+
+
+def _seen_template_version() -> int:
+    try:
+        with open(_template_version_file()) as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _record_template_version() -> None:
+    try:
+        with open(_template_version_file(), "w") as f:
+            f.write(str(TEMPLATE_VERSION))
+    except OSError:
+        pass
+
+
+def _maybe_offer_template_upgrade() -> None:
+    from aqt.utils import askUser
     from .card_builder import ensure_note_type
+
+    if _seen_template_version() >= TEMPLATE_VERSION:
+        return
 
     cfg = _get_config()
     name = cfg.get("note_type_name", "PDF Occlusion")
-    if not (mw.col.models.by_name(name) or mw.col.models.by_name("PDF Image Occlusion")):
-        showInfo("No PDF Occlusion note type was found in this collection.")
-        return
-
-    ensure_note_type(mw.col, name)
-    mw.reset()
-    showInfo(
-        "PDF Occlusion cards upgraded:\n"
-        "• templates and styling refreshed\n"
-        "• existing cards converted to image thumbnails"
+    has_notes = bool(
+        mw.col
+        and (mw.col.models.by_name(name) or mw.col.models.by_name("PDF Image Occlusion"))
     )
+    if has_notes and askUser(
+        "PDF Occlusion was updated with improved card templates\n"
+        "(flicker-free reveal and refreshed styling).\n\n"
+        "Update your existing PDF Occlusion cards now?\n\n"
+        "(If you skip this, they'll be updated automatically the\n"
+        "next time you create cards.)",
+        title="PDF Occlusion",
+    ):
+        ensure_note_type(mw.col, name)
+        mw.reset()
+    # Record either way — never nag on every startup.
+    _record_template_version()
 
 
-upgrade_action = QAction("Upgrade PDF Occlusion cards", mw)
-upgrade_action.triggered.connect(upgrade_existing_cards)
-mw.form.menuTools.addAction(upgrade_action)
+gui_hooks.profile_did_open.append(_maybe_offer_template_upgrade)
 
 
 # ── Editor toolbar button ─────────────────────────────────────────────────────

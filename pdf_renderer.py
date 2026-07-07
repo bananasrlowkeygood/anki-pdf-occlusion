@@ -59,13 +59,21 @@ def _import_pdfium():
         ) from exc
 
 
-def render_pdf(path: str, scale: float = 1.0) -> list[QImage]:
-    """Render every page of the PDF at `scale` and return a list of QImages."""
+def render_pdf(path: str, scale: float = 1.0, on_progress=None) -> list[QImage]:
+    """Render every page of the PDF at `scale` and return a list of QImages.
+
+    on_progress(done, total) is called before each page; returning False
+    cancels the render and the pages rendered so far are returned.
+    """
     pdfium = _import_pdfium()
     doc = pdfium.PdfDocument(path)
     images: list[QImage] = []
     try:
-        for page in doc:
+        n = len(doc)
+        for i, page in enumerate(doc):
+            if on_progress and on_progress(i, n) is False:
+                page.close()
+                break
             bitmap = page.render(scale=scale, rev_byteorder=True)
             buf = bytes(bitmap.buffer)
             fmt = (

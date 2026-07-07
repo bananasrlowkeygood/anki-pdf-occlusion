@@ -2,15 +2,15 @@
   <style>
     .page  { fill: none; stroke: #1a1a1a; stroke-opacity: 0.75; }
     .line  { stroke: #1a1a1a; stroke-opacity: 0.3; }
-    .badge { fill: #F2A900; }
-    .cross { stroke: #1a1a1a; stroke-opacity: 0.8; }
-    .box   { fill: #F2A900; }
+    .badge { fill: #4E2A84; }
+    .cross { stroke: #ffffff; stroke-opacity: 0.95; }
+    .box   { fill: #4E2A84; }
     @media (prefers-color-scheme: dark) {
       .page  { stroke: #e0e0e0; stroke-opacity: 0.75; }
       .line  { stroke: #e0e0e0; stroke-opacity: 0.3; }
-      .badge { fill: #F2A900; }
+      .badge { fill: #836EAA; }
       .cross { stroke: #1a1a1a; stroke-opacity: 0.85; }
-      .box   { fill: #F2A900; }
+      .box   { fill: #836EAA; }
     }
   </style>
   <rect  class="page" x="3" y="1" width="16" height="22" rx="2" stroke-width="1.4"/>

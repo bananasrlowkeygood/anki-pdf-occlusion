@@ -33,6 +33,24 @@ _MEDIA_PREFIX = "pdf_occ_"
 # Image Occlusion Enhanced). norm() wraps any older card that still holds a bare
 # filename, so both formats render. The answer mask is preloaded in #io-preload
 # so revealing the answer paints both layers from cache at once — no flash.
+#
+# Flicker guard (Image Occlusion Enhanced technique): #io-original starts
+# visibility:hidden and is only revealed once the overlay mask has finished
+# loading, so the bare slide never flashes before the mask paints over it.
+# visibility (not display) keeps the layout box, so there is no reflow either.
+# A short timeout + error handler guarantee the card can never stay blank.
+_REVEAL_JS = """\
+  var orig = document.getElementById("io-original");
+  var mask = document.querySelector("#io-overlay img");
+  function reveal(){ if (orig) orig.style.visibility = "visible"; }
+  if (!mask || mask.complete) {
+    reveal();
+  } else {
+    mask.addEventListener("load", reveal);
+    mask.addEventListener("error", reveal);
+    setTimeout(reveal, 400);
+  }"""
+
 _FRONT_TMPL = """\
 <div id="io-wrapper">
   <div id="io-original">{{Image}}</div>
@@ -50,6 +68,7 @@ _FRONT_TMPL = """\
     }
   }
   norm("io-original"); norm("io-overlay"); norm("io-preload");
+""" + _REVEAL_JS + """
 })();
 </script>"""
 
@@ -74,6 +93,7 @@ _BACK_TMPL = """\
   var img = document.querySelector("#io-overlay img");
   window._ioAnswerMask = img ? img.getAttribute("src") : "";
   window._ioAllHidden = false;
+""" + _REVEAL_JS + """
 })();
 </script>
 <div id="io-extra">{{Remarks}}</div>
@@ -101,10 +121,19 @@ _CSS = """\
   background: #fff;
   color: #333;
 }
+.card.night_mode {
+  background: #2c2c2e;
+  color: #d6d6d6;
+}
 #io-wrapper {
   position: relative;
   display: inline-block;
   max-width: 100%;
+}
+#io-original {
+  /* Hidden until the overlay mask has loaded (see template JS) so the
+     unmasked slide never flashes on screen. Don't edit. */
+  visibility: hidden;
 }
 #io-original img {
   display: block;
@@ -134,6 +163,9 @@ _CSS = """\
   color: #888;
   font-size: 11px;
 }
+.night_mode #io-header {
+  color: #9b9b9b;
+}
 #io-extra {
   margin-top: 10px;
   font-size: 13px;
@@ -143,7 +175,7 @@ _CSS = """\
   text-align: center;
 }
 #io-toggle-btn {
-  background: #4a90d9;
+  background: #836EAA;
   color: white;
   font-weight: bold;
   font-size: 13px;
@@ -153,7 +185,14 @@ _CSS = """\
   cursor: pointer;
 }
 #io-toggle-btn:hover {
-  background: #357abd;
+  background: #75619b;
+}
+.night_mode #io-toggle-btn {
+  background: #836EAA;
+  color: #1a1a1a;
+}
+.night_mode #io-toggle-btn:hover {
+  background: #9885b8;
 }"""
 
 
@@ -245,8 +284,11 @@ def _color_str(color: tuple) -> str:
     return f"rgb({color[0]},{color[1]},{color[2]})"
 
 
-# Distinct highlight color for the box currently being tested
-_HIGHLIGHT_COLOR = (255, 140, 0)
+# Default colours: boxes NOT being tested are neutral grey; the box being
+# tested is purple. Both are configurable (mask_color /
+# highlight_color). The highlight stroke is derived (darker highlight).
+_DEFAULT_MASK_COLOR = (120, 120, 120)
+_DEFAULT_HIGHLIGHT_COLOR = (131, 110, 170)
 
 
 def _make_masks(
@@ -255,29 +297,34 @@ def _make_masks(
     all_boxes: list[dict],
     color: tuple,
     mode: str,
+    opacity: float = 1.0,
+    highlight: tuple = _DEFAULT_HIGHLIGHT_COLOR,
 ) -> tuple[bytes, bytes]:
     """
     Returns (q_svg_bytes, a_svg_bytes) for the given mode.
 
     active    – boxes being tested on this card
     all_boxes – every box on this slide
+    opacity   – 0..1 fill opacity of masking rects (from mask_opacity config)
+    highlight – colour of the box(es) being tested
     """
     c = _color_str(color)
-    h = _color_str(_HIGHLIGHT_COLOR)
+    h = _color_str(highlight)
+    hs = _color_str(tuple(int(v * 0.6) for v in highlight))
     non_active = [b for b in all_boxes if b not in active]
 
     if mode == "ao":
         # ── Front: non-active boxes opaque; active always highlighted ────────
-        q_rects = [_rect(b, c, 1.0) for b in non_active]
-        q_rects += [_rect(b, h, 1.0) for b in active]
+        q_rects = [_rect(b, c, opacity) for b in non_active]
+        q_rects += [_rect(b, h, opacity, hs, 1.0, 3) for b in active]
 
         # ── Back: non-active stay opaque; active disappears completely ───────
-        a_rects = [_rect(b, c, 1.0) for b in non_active]
+        a_rects = [_rect(b, c, opacity) for b in non_active]
 
     else:  # oa
         # ── Front: only active opaque; others as faint outlines ──────────────
         q_rects  = [_rect(b, c, 0.15, c, 0.5, 2) for b in non_active]
-        q_rects += [_rect(b, c, 1.0)              for b in active]
+        q_rects += [_rect(b, c, opacity, hs, 1.0, 3) for b in active]
 
         # ── Back: all boxes disappear completely (no outlines) ───────────────
         a_rects = []
@@ -300,15 +347,20 @@ def create_occlusion_notes(
     deck_id: int,
     note_type: NotetypeDict,
     pages: list[tuple[int, QImage, list[dict]]],
-    mask_color: tuple = (46, 120, 217),
-    mask_opacity: int = 200,
+    mask_color: tuple = _DEFAULT_MASK_COLOR,
+    mask_opacity: int = 255,
+    highlight_color: tuple = _DEFAULT_HIGHLIGHT_COLOR,
     lecture_name: str = "",
     total_slides: int = 0,
     mode: str = "ao",
+    on_progress=None,
 ) -> int:
     total_created = 0
+    opacity = max(0.0, min(1.0, mask_opacity / 255))
 
-    for page_idx, img, boxes in pages:
+    for done, (page_idx, img, boxes) in enumerate(pages):
+        if on_progress:
+            on_progress(done, len(pages))
         W, H = img.width(), img.height()
 
         slide_label = f"Slide {page_idx + 1}/{total_slides}" if total_slides else f"Slide {page_idx + 1}"
@@ -325,7 +377,8 @@ def create_occlusion_notes(
 
         # ── individual boxes ─────────────────────────────────────────────
         for box_num, box in enumerate(ungrouped):
-            q_svg, a_svg = _make_masks(W, H, [box], boxes, mask_color, mode)
+            q_svg, a_svg = _make_masks(W, H, [box], boxes, mask_color, mode,
+                                       opacity, highlight_color)
             q_fname = _save_media(col, q_svg, ".svg")
             a_fname = _save_media(col, a_svg, ".svg")
 
@@ -339,7 +392,8 @@ def create_occlusion_notes(
 
         # ── groups ───────────────────────────────────────────────────────
         for gid, grp_boxes in grouped.items():
-            q_svg, a_svg = _make_masks(W, H, grp_boxes, boxes, mask_color, mode)
+            q_svg, a_svg = _make_masks(W, H, grp_boxes, boxes, mask_color, mode,
+                                       opacity, highlight_color)
             q_fname = _save_media(col, q_svg, ".svg")
             a_fname = _save_media(col, a_svg, ".svg")
 
