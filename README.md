@@ -1,8 +1,8 @@
 # <img alt="pdf-occlusion-icon" src="icon.svg" height="60"> ‎ ‎ ‎PDF Occlusion
 
-[![Anki](https://img.shields.io/badge/Anki-23.10%2B-4E2A84?style=flat-square)](https://apps.ankiweb.net)
+[![Anki](https://img.shields.io/badge/Anki-23.10%2B-836EAA?style=flat-square)](https://apps.ankiweb.net)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-836EAA?style=flat-square)](https://github.com/bananasrlowkeygood/anki-pdf-occlusion)
-[![License](https://img.shields.io/badge/license-MIT-B6ACD1?style=flat-square)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-836EAA?style=flat-square)](LICENSE)
 
 **PDF Occlusion** is an Anki add-on that creates image occlusion cards directly from PDF lecture slides. No more importing one image at a time. Open any PDF, draw boxes over what you want to memorize, and generate cards in bulk. Built for studying from slide-heavy lectures.
 
@@ -15,9 +15,8 @@ Cards use the same flicker-free layered rendering as [Image Occlusion Enhanced](
 - [3. Editing Tools](#editing-tools)
 - [4. Keyboard Shortcuts](#keyboard-shortcuts)
 - [5. Configuration](#configuration)
-- [6. Notes](#notes)
-- [7. Contact](#contact)
-- [8. License](#license)
+- [6. Contact](#contact)
+- [7. License](#license)
 
 ## Installation
 
@@ -85,14 +84,6 @@ Cards use the same flicker-free layered rendering as [Image Occlusion Enhanced](
 | `note_type_name` | `string` | `"PDF Occlusion"` | Name of the note type to create/reuse |
 | `add_editor_button` | `bool` | `true` | Show or hide the toolbar button in the card editor |
 | `close_after_creating` | `bool` | `true` | Close the dialog automatically after cards are created |
-
-## Notes
-
-- A **PDF Occlusion** note type is created automatically on first use.
-- Cards support Anki's night mode.
-- **After updating the add-on**, you'll be offered a one-time upgrade of your existing cards to the latest template (including the flicker fix). Skipping it is fine — templates are refreshed automatically the next time you create cards.
-- Media files are cleaned up automatically when the last card referencing a slide is deleted
-- Compatible with [Image Occlusion Enhanced](https://github.com/glutanimate/image-occlusion-enhanced) — both add-ons can run in the same profile
 
 ## Contact
 
