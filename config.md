@@ -11,4 +11,4 @@
 | `close_after_creating` | bool | `true` | Close the dialog automatically after cards are created. |
 | `note_type_name` | string | `"PDF Occlusion"` | Name of the note type to create/reuse. Change this to adopt an existing type. |
 | `default_deck` | string | `""` | Deck preselected in the dialog's deck picker. Empty string = the deck currently selected in Anki. You can always change it per session in the dialog. |
-| `occlusion_mode` | `"ao"` / `"oa"` | `"ao"` | Default occlusion mode: `"ao"` = Hide All, Show One; `"oa"` = Hide One, Show One. Changeable per session in the dialog. |
+| `occlusion_mode` | `"ao"` / `"oa"` | `"ao"` | Default occlusion mode: `"ao"` = Hide All, Show One; `"oa"` = Hide One, Show One. Changeable per slide via the "This slide" picker and per box via right-click → Occlusion Mode. |

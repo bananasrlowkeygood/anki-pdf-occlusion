@@ -17,7 +17,14 @@ def _get_config():
 
 def open_pdf_occlusion(editor: Editor = None):
     from .pdf_occlusion_dialog import PDFOcclusionDialog
-    dlg = PDFOcclusionDialog(mw, editor=editor)
+    # From the Browse/Add editor: if the current note is one of ours, open
+    # its session directly and focus the slide + box behind that card.
+    note_id = None
+    if editor is not None:
+        note = getattr(editor, "note", None)
+        if note is not None and getattr(note, "id", 0):
+            note_id = note.id
+    dlg = PDFOcclusionDialog(mw, editor=editor, note_id=note_id)
     dlg.exec()
 
 
@@ -38,7 +45,7 @@ mw.form.menuTools.addAction(action)
 # The seen-version marker lives in user_files/ (preserved across add-on
 # updates) rather than in config, so config.json defaults stay live.
 
-TEMPLATE_VERSION = 2  # v2: flicker-free reveal + purple styling
+TEMPLATE_VERSION = 3  # v3: Remarks field renamed to Notes; v2: flicker-free reveal
 
 
 def _template_version_file() -> str:
@@ -77,11 +84,8 @@ def _maybe_offer_template_upgrade() -> None:
         and (mw.col.models.by_name(name) or mw.col.models.by_name("PDF Image Occlusion"))
     )
     if has_notes and askUser(
-        "PDF Occlusion was updated with improved card templates\n"
-        "(flicker-free reveal and refreshed styling).\n\n"
-        "Update your existing PDF Occlusion cards now?\n\n"
-        "(If you skip this, they'll be updated automatically the\n"
-        "next time you create cards.)",
+        "PDF Occlusion's card templates were updated.\n"
+        "Update your existing cards now?",
         title="PDF Occlusion",
     ):
         ensure_note_type(mw.col, name)

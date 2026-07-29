@@ -37,10 +37,12 @@ ADDON_FILES = [
     "pdf_occlusion_dialog.py",
     "occlusion_canvas.py",
     "card_builder.py",
+    "session_store.py",
     "config.json",
     "config.md",
     "manifest.json",
     "icon.svg",
+    "caret.svg",
 ]
 
 

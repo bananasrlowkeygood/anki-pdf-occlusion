@@ -4,28 +4,44 @@ Interactive canvas for drawing/removing/grouping occlusion boxes.
 Box coordinates are stored in original (1×) image space.
 Zoom only affects display.
 
+Tools (see set_tool):
+  - "draw"   — drag on empty space draws a box
+  - "select" — drag on empty space rubber-band selects boxes
+
 Editing:
-  - Drag on empty space to draw a box
   - Drag a box to move it (multi-selection moves together)
+  - Shift-drag a grouped box to move its whole group together
   - Drag any corner handle of a selected box to resize
   - Arrow keys nudge selected boxes by 1 px (Shift = 10 px)
   - Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y) undo / redo
   - Ctrl+C / Ctrl+V copy / paste boxes — the clipboard survives slide
     changes, so a repeating layout can be stamped onto every slide
+  - Double-click a box to attach a note (goes to the card's Notes field)
+  - Pinch (or Ctrl/Cmd+scroll) zooms; the dialog anchors it at the cursor
 
 Grouping:
   - Shift-click boxes to multi-select
-  - Press G (or toolbar button) to group selected boxes → same group ID
-  - Press U (or toolbar button) to ungroup selected boxes
+  - Press G (or context menu) to group selected boxes → same group ID
+  - Shift-DRAW: a box drawn while holding Shift joins the selection's group
+    (creating one if needed), so you can sketch a multi-part card in one go
+  - Press U (or context menu) to ungroup selected boxes
   - Each group produces one card with ALL boxes in that group masked together
   - Ungrouped boxes each produce their own card
+
+Per-box data (kept in the box dicts, consumed by card_builder):
+  - "shape": "rect" | "ellipse"
+  - "mode":  None (follow slide/PDF default) | "ao" | "oa"
+  - "note":  free text → card's Notes field
+  - "id" / "group_uid": stable UUIDs so a re-created card can be updated
+    in place instead of duplicated
 """
+import uuid
 from typing import Optional
 
 from aqt.qt import (
     QWidget, QPainter, QPen, QColor, QRect, QPoint, QPointF,
     QPixmap, QImage, Qt, QCursor, QMenu, QAction, QKeyEvent,
-    pyqtSignal,
+    QInputDialog, QEvent, pyqtSignal,
 )
 
 # ------------------------------------------------------------------ colours
@@ -39,6 +55,12 @@ _SEL_FILL         = QColor(255, 199, 44, 185)   # gold — selection pops on pur
 _SEL_BORDER       = QColor(178, 128, 0, 240)
 _HANDLE_OUTLINE   = QColor(255, 255, 255, 240)
 _HANDLE_SIZE      = 5   # half-size in screen px
+
+_BAND_FILL        = QColor(131, 110, 170, 40)   # rubber-band marquee
+_BAND_BORDER      = QColor(131, 110, 170, 220)
+
+_BADGE_BG         = QColor(0, 0, 0, 120)
+_BADGE_FG         = QColor(255, 255, 255, 230)
 
 # One colour per group index (cycles if > len).
 # No purple entry — purple is reserved for ungrouped masks.
@@ -56,6 +78,9 @@ _GROUP_PALETTE = [
 _NUDGE_STEP = 1
 _NUDGE_STEP_BIG = 10
 _MAX_HISTORY = 100
+_DRAG_THRESHOLD = 4   # screen px before a press becomes a drag
+
+_MODE_LABELS = {"ao": "AO", "oa": "OA"}
 
 
 def _group_color(gid: int, selected: bool, alpha: int = 160) -> QColor:
@@ -73,28 +98,42 @@ def _pix_to_qpixmap(img: QImage) -> QPixmap:
 # -------------------------------------------------------------------- _Box
 
 class _Box:
-    __slots__ = ("x", "y", "w", "h", "group")
+    __slots__ = ("x", "y", "w", "h", "group", "group_uid",
+                 "shape", "mode", "note", "id")
 
     def __init__(self, x: float, y: float, w: float, h: float,
-                 group: Optional[int] = None):
+                 group: Optional[int] = None, group_uid: Optional[str] = None,
+                 shape: str = "rect", mode: Optional[str] = None,
+                 note: str = "", box_id: Optional[str] = None):
         self.x, self.y, self.w, self.h = x, y, w, h
         self.group = group
+        self.group_uid = group_uid
+        self.shape = shape if shape in ("rect", "ellipse") else "rect"
+        self.mode = mode if mode in ("ao", "oa") else None
+        self.note = note or ""
+        self.id = box_id or uuid.uuid4().hex
 
     def norm(self) -> "_Box":
         x, y, w, h = self.x, self.y, self.w, self.h
         if w < 0: x += w; w = -w
         if h < 0: y += h; h = -h
-        return _Box(x, y, w, h, self.group)
+        return _Box(x, y, w, h, self.group, self.group_uid,
+                    self.shape, self.mode, self.note, self.id)
 
     def to_dict(self) -> dict:
         n = self.norm()
         return {"x": int(n.x), "y": int(n.y),
                 "w": int(n.w), "h": int(n.h),
-                "group": self.group}
+                "group": self.group, "group_uid": self.group_uid,
+                "shape": self.shape, "mode": self.mode,
+                "note": self.note, "id": self.id}
 
     @classmethod
     def from_dict(cls, d: dict) -> "_Box":
-        return cls(d["x"], d["y"], d["w"], d["h"], d.get("group"))
+        return cls(d["x"], d["y"], d["w"], d["h"],
+                   d.get("group"), d.get("group_uid"),
+                   d.get("shape", "rect"), d.get("mode"),
+                   d.get("note", ""), d.get("id"))
 
     def screen_rect(self, zoom: float) -> QRect:
         n = self.norm()
@@ -129,12 +168,15 @@ class _Box:
 # ---------------------------------------------------------- OcclusionCanvas
 
 class OcclusionCanvas(QWidget):
-    # Emitted whenever boxes change so the dialog can update group count label
+    # Emitted whenever boxes change so the dialog can update the card counter
     boxes_changed = pyqtSignal()
     # Emitted with -1/+1 when Left/Right is pressed with no selection —
     # the dialog flips slides. (Arrows nudge when boxes are selected, so
     # slide navigation can't be a window-level shortcut.)
     slide_nav = pyqtSignal(int)
+    # Pinch / Ctrl+scroll: (zoom delta, cursor position in canvas coords).
+    # The dialog owns zoom state, so it applies the change and re-anchors.
+    zoom_gesture = pyqtSignal(float, QPoint)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -146,6 +188,7 @@ class OcclusionCanvas(QWidget):
         self._boxes: list[_Box] = []
         self._selected: set[_Box] = set()
         self._next_gid: int = 0   # monotonic group-id counter
+        self._tool: str = "draw"
         self.set_mask_color(_DEFAULT_MASK_RGB)
 
         # undo/redo — per slide, reset on set_image
@@ -159,12 +202,18 @@ class OcclusionCanvas(QWidget):
 
         # interaction state
         self._drawing = False
+        self._banding = False           # rubber-band selection (select tool)
+        self._band_base_sel: set = set()
+        self._draw_shift = False        # Shift held when the draw started
         self._drag_start: Optional[QPointF] = None
         self._drag_current: Optional[QPointF] = None
         self._resizing: Optional[_Box] = None
         self._resize_anchor: Optional[QPointF] = None
         self._moving: Optional[_Box] = None
         self._move_offset = QPointF(0, 0)
+        self._press_spos: Optional[QPoint] = None
+        self._drag_started = False
+        self._shift_press_box: Optional[_Box] = None
 
         self.setMouseTracking(True)
         self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
@@ -183,6 +232,17 @@ class OcclusionCanvas(QWidget):
         self._ungrouped_fill = QColor(r, g, b, 150)
         self._ungrouped_border = QColor(
             int(r * 0.6), int(g * 0.6), int(b * 0.6), 225)
+
+    def set_tool(self, tool: str):
+        """Active tool: "draw" (drag draws boxes) or "select" (drag marquee-selects)."""
+        if tool in ("draw", "select"):
+            self._tool = tool
+            self.setCursor(QCursor(
+                Qt.CursorShape.CrossCursor if tool == "draw"
+                else Qt.CursorShape.ArrowCursor))
+
+    def tool(self) -> str:
+        return self._tool
 
     def set_image(self, img: QImage, boxes: list[dict], render_scale: float = 1.0):
         self._pixmap = _pix_to_qpixmap(img)
@@ -204,6 +264,21 @@ class OcclusionCanvas(QWidget):
     def get_boxes(self) -> list[dict]:
         return [b.to_dict() for b in self._boxes]
 
+    def add_boxes(self, dicts: list[dict], select: bool = True):
+        """Add boxes programmatically (e.g. text detection). One undo step."""
+        if not dicts:
+            return
+        self._push_undo()
+        added = []
+        for d in dicts:
+            box = _Box.from_dict(d)
+            self._boxes.append(box)
+            added.append(box)
+        if select:
+            self._selected = set(added)
+        self.boxes_changed.emit()
+        self.update()
+
     def set_zoom(self, zoom: float):
         self._zoom = max(0.1, min(4.0, zoom))
         self._apply_size()
@@ -216,11 +291,21 @@ class OcclusionCanvas(QWidget):
         """Assign selected boxes to a new shared group."""
         if len(self._selected) < 2:
             return
+        # Already exactly one whole group? Nothing to do — this also makes a
+        # held-down G key (auto-repeat) harmless instead of minting a fresh
+        # group id on every repeat.
+        sel_gids = {b.group for b in self._selected}
+        if len(sel_gids) == 1 and None not in sel_gids:
+            gid = next(iter(sel_gids))
+            if self._selected == {b for b in self._boxes if b.group == gid}:
+                return
         self._push_undo()
         gid = self._next_gid
         self._next_gid += 1
+        guid = uuid.uuid4().hex
         for b in self._selected:
             b.group = gid
+            b.group_uid = guid
         self.boxes_changed.emit()
         self.update()
 
@@ -231,12 +316,45 @@ class OcclusionCanvas(QWidget):
         self._push_undo()
         for b in self._selected:
             b.group = None
+            b.group_uid = None
         self.boxes_changed.emit()
         self.update()
 
     def select_all(self):
         self._selected = set(self._boxes)
         self.update()
+
+    def select_region(self, box_id: Optional[str] = None,
+                      group_uid: Optional[str] = None):
+        """Select the box / group backing a specific card (Browse → edit)."""
+        if box_id is not None:
+            self._selected = {b for b in self._boxes if b.id == box_id}
+        elif group_uid is not None:
+            self._selected = {b for b in self._boxes if b.group_uid == group_uid}
+        self.update()
+
+    def selection_count(self) -> int:
+        return len(self._selected)
+
+    def set_mode_selected(self, mode: Optional[str]):
+        """Occlusion-mode override for the selected region(s).
+
+        Applied to every member of any group touched, so a region always
+        has one consistent mode."""
+        targets = self._expand_to_groups(self._selected)
+        if not targets:
+            return
+        self._push_undo()
+        for b in targets:
+            b.mode = mode
+        self.boxes_changed.emit()
+        self.update()
+
+    def edit_note_selected(self):
+        """Attach a note to the selected region (→ card's Notes field)."""
+        targets = self._expand_to_groups(self._selected)
+        if targets:
+            self._edit_note(targets)
 
     def group_summary(self) -> dict:
         """Return {"groups": count_of_distinct_groups, "ungrouped": count}."""
@@ -289,6 +407,7 @@ class OcclusionCanvas(QWidget):
         # remap clipboard group ids to fresh ones so pasting never merges
         # with an existing group on this slide
         gid_map: dict[int, int] = {}
+        guid_map: dict[str, str] = {}
         # offset only if an identical box already sits at the same spot
         # (i.e. pasting onto the slide the boxes were copied from)
         existing = {(d["x"], d["y"], d["w"], d["h"]) for d in self.get_boxes()}
@@ -300,12 +419,18 @@ class OcclusionCanvas(QWidget):
         pasted = []
         for d in self._clipboard:
             gid = d.get("group")
+            guid = d.get("group_uid")
             if gid is not None:
                 if gid not in gid_map:
                     gid_map[gid] = self._next_gid
                     self._next_gid += 1
                 gid = gid_map[gid]
-            box = _Box(d["x"] + off, d["y"] + off, d["w"], d["h"], gid)
+                if guid is not None:
+                    guid = guid_map.setdefault(guid, uuid.uuid4().hex)
+            # fresh box id — a pasted box is a new region, not the old card
+            box = _Box(d["x"] + off, d["y"] + off, d["w"], d["h"],
+                       gid, guid, d.get("shape", "rect"), d.get("mode"),
+                       d.get("note", ""), None)
             self._boxes.append(box)
             pasted.append(box)
 
@@ -330,11 +455,68 @@ class OcclusionCanvas(QWidget):
     def _to_img(self, spos: QPoint) -> QPointF:
         return QPointF(spos.x() / self._disp, spos.y() / self._disp)
 
+    def _group_members(self, box: _Box) -> set[_Box]:
+        if box.group is None:
+            return {box}
+        return {b for b in self._boxes if b.group == box.group}
+
+    def _expand_to_groups(self, boxes: set) -> set:
+        out: set[_Box] = set()
+        for b in boxes:
+            out |= self._group_members(b)
+        return out
+
+    def _band_rect(self) -> Optional[QRect]:
+        if not (self._drag_start and self._drag_current):
+            return None
+        tmp = _Box(self._drag_start.x(), self._drag_start.y(),
+                   self._drag_current.x() - self._drag_start.x(),
+                   self._drag_current.y() - self._drag_start.y())
+        return tmp.screen_rect(self._disp)
+
+    def _apply_band_selection(self):
+        """Live-update the selection while the marquee is dragged."""
+        band = self._band_rect()
+        if band is None:
+            return
+        hits = {b for b in self._boxes
+                if band.intersects(b.screen_rect(self._disp))}
+        self._selected = self._band_base_sel | hits
+
+    def _edit_note(self, targets: set):
+        current = next((b.note for b in targets if b.note), "")
+        text, ok = QInputDialog.getMultiLineText(
+            self, "Card Note",
+            "Shown in the card's Notes field (below the answer):",
+            current,
+        )
+        if not ok:
+            return
+        self._push_undo()
+        for b in targets:
+            b.note = text.strip()
+        self.boxes_changed.emit()
+        self.update()
+
     # ----------------------------------------------------------------- paint
+
+    def _paint_shape(self, p: QPainter, box: _Box, r: QRect,
+                     fill: QColor, border: QColor, border_w: float):
+        pen = QPen(border, border_w)
+        if box.shape == "ellipse":
+            p.setPen(pen)
+            p.setBrush(fill)
+            p.drawEllipse(r)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+        else:
+            p.fillRect(r, fill)
+            p.setPen(pen)
+            p.drawRect(r)
 
     def paintEvent(self, _event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         if self._pixmap:
             p.drawPixmap(
@@ -342,6 +524,11 @@ class OcclusionCanvas(QWidget):
                       int(self._orig_h * self._disp)),
                 self._pixmap,
             )
+
+        font = p.font()
+        font.setPointSize(8)
+        font.setBold(True)
+        p.setFont(font)
 
         for box in self._boxes:
             sel = box in self._selected
@@ -354,10 +541,7 @@ class OcclusionCanvas(QWidget):
                 fill = _SEL_FILL if sel else self._ungrouped_fill
                 border = _SEL_BORDER if sel else self._ungrouped_border
 
-            p.fillRect(r, fill)
-            pen = QPen(border, 2.0 if sel else 1.5)
-            p.setPen(pen)
-            p.drawRect(r)
+            self._paint_shape(p, box, r, fill, border, 2.0 if sel else 1.5)
 
             # group label
             if box.group is not None:
@@ -365,6 +549,25 @@ class OcclusionCanvas(QWidget):
                 p.drawText(r.adjusted(3, 2, -3, -2),
                            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
                            f"G{box.group + 1}")
+
+            # mode-override badge (bottom-left) — only when this region
+            # deviates from the slide/PDF default
+            if box.mode is not None and r.height() >= 16 and r.width() >= 26:
+                label = _MODE_LABELS.get(box.mode, "")
+                if label:
+                    chip = QRect(r.left() + 2, r.bottom() - 13, 20, 11)
+                    p.fillRect(chip, _BADGE_BG)
+                    p.setPen(_BADGE_FG)
+                    p.drawText(chip, Qt.AlignmentFlag.AlignCenter, label)
+
+            # note indicator (top-right dot)
+            if box.note:
+                d = 7
+                dot = QRect(r.right() - d - 2, r.top() + 2, d, d)
+                p.setPen(QPen(QColor(60, 60, 60, 220), 1))
+                p.setBrush(QColor(255, 255, 255, 235))
+                p.drawEllipse(dot)
+                p.setBrush(Qt.BrushStyle.NoBrush)
 
             # corner resize handles — only on selected boxes to keep the
             # canvas uncluttered. Filled with the box's border colour and
@@ -384,11 +587,45 @@ class OcclusionCanvas(QWidget):
                        self._drag_current.x() - self._drag_start.x(),
                        self._drag_current.y() - self._drag_start.y())
             r = tmp.screen_rect(self._disp)
-            p.fillRect(r, self._ungrouped_fill)
-            p.setPen(QPen(self._ungrouped_border, 1.5))
-            p.drawRect(r)
+            self._paint_shape(p, tmp, r, self._ungrouped_fill,
+                              self._ungrouped_border, 1.5)
+
+        # rubber-band marquee (select tool)
+        if self._banding:
+            band = self._band_rect()
+            if band is not None:
+                p.fillRect(band, _BAND_FILL)
+                pen = QPen(_BAND_BORDER, 1)
+                pen.setStyle(Qt.PenStyle.DashLine)
+                p.setPen(pen)
+                p.drawRect(band)
 
         p.end()
+
+    # ------------------------------------------------------------- gestures
+
+    def event(self, ev):
+        # macOS trackpad pinch arrives as a native gesture, not a wheel event
+        if ev.type() == QEvent.Type.NativeGesture:
+            try:
+                if ev.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                    self.zoom_gesture.emit(ev.value(), ev.position().toPoint())
+                    return True
+            except AttributeError:
+                pass
+        return super().event(ev)
+
+    def wheelEvent(self, ev):
+        # Ctrl/Cmd + scroll zooms (mouse-wheel equivalent of the pinch);
+        # a plain scroll is left for the scroll area to pan with.
+        if ev.modifiers() & (Qt.KeyboardModifier.ControlModifier
+                             | Qt.KeyboardModifier.MetaModifier):
+            delta = ev.angleDelta().y() / 800.0
+            if delta:
+                self.zoom_gesture.emit(delta, ev.position().toPoint())
+            ev.accept()
+        else:
+            ev.ignore()
 
     # --------------------------------------------------------------- mouse
 
@@ -414,6 +651,9 @@ class OcclusionCanvas(QWidget):
         spos = event.pos()
         ipos = self._to_img(spos)
         shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        self._press_spos = spos
+        self._drag_started = False
+        self._shift_press_box = None
 
         # corner handle of a selected box?
         box, corner = self._handle_at(spos)
@@ -428,10 +668,10 @@ class OcclusionCanvas(QWidget):
         for box in reversed(self._boxes):
             if box.contains_screen(spos.x(), spos.y(), self._disp):
                 if shift:
-                    if box in self._selected:
-                        self._selected.discard(box)
-                    else:
-                        self._selected.add(box)
+                    # Defer: a shift-CLICK toggles selection membership, a
+                    # shift-DRAG moves the box's whole group. Which one it
+                    # is only becomes clear once the mouse moves (or not).
+                    self._shift_press_box = box
                 else:
                     if box not in self._selected:
                         self._selected = {box}
@@ -443,10 +683,17 @@ class OcclusionCanvas(QWidget):
                 self.update()
                 return
 
-        # empty space — deselect (unless shift) and start drawing
-        if not shift:
-            self._selected = set()
-        self._drawing = True
+        # empty space — marquee-select or draw, depending on the active tool
+        if self._tool == "select":
+            self._banding = True
+            self._band_base_sel = set(self._selected) if shift else set()
+            if not shift:
+                self._selected = set()
+        else:
+            if not shift:
+                self._selected = set()
+            self._drawing = True
+            self._draw_shift = shift
         self._drag_start = ipos
         self._drag_current = ipos
         self.update()
@@ -465,6 +712,13 @@ class OcclusionCanvas(QWidget):
             return
 
         if self._moving:
+            if not self._drag_started:
+                if (spos - (self._press_spos or spos)).manhattanLength() < _DRAG_THRESHOLD:
+                    return
+                self._drag_started = True
+                if self._shift_press_box is not None:
+                    # shift-drag → move the whole group together
+                    self._selected = self._group_members(self._shift_press_box)
             delta = ipos - self._move_offset
             # Move all selected boxes together if the dragged box is selected
             if self._moving in self._selected and len(self._selected) > 1:
@@ -486,8 +740,10 @@ class OcclusionCanvas(QWidget):
             self.update()
             return
 
-        if self._drawing:
+        if self._drawing or self._banding:
             self._drag_current = ipos
+            if self._banding:
+                self._apply_band_selection()
             self.update()
             return
 
@@ -502,7 +758,9 @@ class OcclusionCanvas(QWidget):
             if box.contains_screen(spos.x(), spos.y(), self._disp):
                 self.setCursor(QCursor(Qt.CursorShape.SizeAllCursor))
                 return
-        self.setCursor(QCursor(Qt.CursorShape.CrossCursor))
+        self.setCursor(QCursor(
+            Qt.CursorShape.CrossCursor if self._tool == "draw"
+            else Qt.CursorShape.ArrowCursor))
 
     def _commit_drag(self):
         """Push the pre-drag snapshot onto undo, unless nothing changed."""
@@ -530,9 +788,27 @@ class OcclusionCanvas(QWidget):
             return
 
         if self._moving:
+            if not self._drag_started and self._shift_press_box is not None:
+                # plain shift-click: toggle selection membership
+                box = self._shift_press_box
+                if box in self._selected:
+                    self._selected.discard(box)
+                else:
+                    self._selected.add(box)
             self._moving = None
+            self._shift_press_box = None
             self._commit_drag()
             self.boxes_changed.emit()
+            self.update()
+            return
+
+        if self._banding:
+            self._apply_band_selection()
+            self._banding = False
+            self._band_base_sel = set()
+            self._drag_start = None
+            self._drag_current = None
+            self.update()
             return
 
         if self._drawing and self._drag_start and self._drag_current:
@@ -544,12 +820,44 @@ class OcclusionCanvas(QWidget):
                 self._push_undo()
                 new_box = _Box(n.x, n.y, n.w, n.h)
                 self._boxes.append(new_box)
-                self._selected = {new_box}
+                # Shift-draw: the new box joins the selection's group so a
+                # multi-part card can be sketched in one pass — draw, then
+                # keep Shift held while drawing the rest.
+                if self._draw_shift and self._selected:
+                    grouped = [b for b in self._selected if b.group is not None]
+                    if grouped:
+                        new_box.group = grouped[0].group
+                        new_box.group_uid = grouped[0].group_uid
+                    else:
+                        gid = self._next_gid
+                        self._next_gid += 1
+                        guid = uuid.uuid4().hex
+                        for b in self._selected:
+                            b.group = gid
+                            b.group_uid = guid
+                        new_box.group = gid
+                        new_box.group_uid = guid
+                    self._selected = set(self._selected) | {new_box}
+                else:
+                    self._selected = {new_box}
                 self.boxes_changed.emit()
             self._drawing = False
+            self._draw_shift = False
             self._drag_start = None
             self._drag_current = None
             self.update()
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        spos = event.pos()
+        for box in reversed(self._boxes):
+            if box.contains_screen(spos.x(), spos.y(), self._disp):
+                targets = self._group_members(box)
+                self._selected = set(targets)
+                self.update()
+                self._edit_note(targets)
+                return
 
     # --------------------------------------------------------------- keyboard
 
@@ -612,6 +920,10 @@ class OcclusionCanvas(QWidget):
             self.ungroup_selected()
             return
 
+        if key == Qt.Key.Key_N and self._selected:
+            self.edit_note_selected()
+            return
+
         if key == Qt.Key.Key_Escape:
             if self._selected:
                 self._selected = set()
@@ -638,37 +950,66 @@ class OcclusionCanvas(QWidget):
                 self._selected = {clicked}
                 self.update()
 
-            remove_act = QAction(
-                f"Remove box{'es' if len(self._selected) > 1 else ''}  (Del)", menu
-            )
-            remove_act.triggered.connect(self._delete_selected)
-            menu.addAction(remove_act)
+            note_act = QAction(
+                "Edit Note…  (N)" if any(b.note for b in self._selected)
+                else "Add Note…  (N)", menu)
+            note_act.triggered.connect(self.edit_note_selected)
+            menu.addAction(note_act)
+
+            # per-region occlusion-mode override
+            mode_menu = menu.addMenu("Occlusion Mode")
+            region = self._expand_to_groups(self._selected)
+            current_modes = {b.mode for b in region}
+            for label, value in (
+                ("Slide Default", None),
+                ("Hide All, Show One", "ao"),
+                ("Hide One, Show One", "oa"),
+            ):
+                act = QAction(label, mode_menu)
+                act.setCheckable(True)
+                act.setChecked(current_modes == {value})
+                act.triggered.connect(
+                    lambda _, m=value: self.set_mode_selected(m))
+                mode_menu.addAction(act)
+
+            menu.addSeparator()
 
             copy_act = QAction("Copy  (Ctrl+C)", menu)
             copy_act.triggered.connect(self.copy_selected)
             menu.addAction(copy_act)
 
+            remove_act = QAction(
+                f"Remove Box{'es' if len(self._selected) > 1 else ''}  (Del)", menu
+            )
+            remove_act.triggered.connect(self._delete_selected)
+            menu.addAction(remove_act)
+
             menu.addSeparator()
 
-            group_act = QAction("Group selected  (G)", menu)
+            group_act = QAction("Group Selected  (G)", menu)
             group_act.setEnabled(len(self._selected) >= 2)
             group_act.triggered.connect(self.group_selected)
             menu.addAction(group_act)
 
-            ungroup_act = QAction("Ungroup selected  (U)", menu)
+            ungroup_act = QAction("Ungroup Selected  (U)", menu)
             ungroup_act.setEnabled(any(b.group is not None for b in self._selected))
             ungroup_act.triggered.connect(self.ungroup_selected)
             menu.addAction(ungroup_act)
 
             # "select whole group" if clicked box is grouped
             if clicked.group is not None:
-                sel_grp = QAction(f"Select all in Group {clicked.group + 1}", menu)
+                sel_grp = QAction(f"Select All in Group {clicked.group + 1}", menu)
                 sel_grp.triggered.connect(
                     lambda _, gid=clicked.group: self._select_group(gid)
                 )
                 menu.addSeparator()
                 menu.addAction(sel_grp)
         else:
+            sel_all_act = QAction("Select All  (Ctrl+A)", menu)
+            sel_all_act.setEnabled(bool(self._boxes))
+            sel_all_act.triggered.connect(self.select_all)
+            menu.addAction(sel_all_act)
+
             paste_act = QAction("Paste  (Ctrl+V)", menu)
             paste_act.setEnabled(bool(self._clipboard))
             paste_act.triggered.connect(self.paste)

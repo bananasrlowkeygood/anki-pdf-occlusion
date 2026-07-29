@@ -96,3 +96,92 @@ def qimage_to_png_bytes(img: QImage) -> bytes:
     ba.open(QIODevice.OpenModeFlag.WriteOnly)
     img.save(ba, "PNG")
     return bytes(ba.data())
+
+
+# ------------------------------------------------------------- text detection
+
+def get_text_line_rects(path: str, page_index: int, scale: float) -> list[tuple]:
+    """Detect text on a page and return merged line-level rects.
+
+    Returns (x, y, w, h) tuples in rendered-image pixel space (i.e. already
+    multiplied by `scale`, matching the QImages from render_pdf). Empty list
+    if the page has no extractable text (e.g. scanned images).
+    """
+    pdfium = _import_pdfium()
+    raw: list[list[float]] = []
+    doc = pdfium.PdfDocument(path)
+    try:
+        page = doc[page_index]
+        try:
+            _, page_h = page.get_size()
+            textpage = page.get_textpage()
+            try:
+                n = textpage.count_rects(0, -1)
+                for i in range(n):
+                    left, bottom, right, top = textpage.get_rect(i)
+                    # PDF coords are bottom-left origin in points; the
+                    # rendered image is top-left origin in px.
+                    x = left * scale
+                    y = (page_h - top) * scale
+                    w = (right - left) * scale
+                    h = (top - bottom) * scale
+                    if w >= 3 and h >= 3:
+                        raw.append([x, y, w, h])
+            finally:
+                textpage.close()
+        finally:
+            page.close()
+    finally:
+        doc.close()
+    return _merge_text_rects(raw)
+
+
+def _merge_text_rects(rects: list[list[float]]) -> list[tuple]:
+    """Cluster raw pdfium text rects into readable line boxes.
+
+    Rects whose vertical centers align are treated as one line; within a
+    line, segments separated by less than ~1 line-height are merged (keeps
+    separate labels/columns as separate boxes). A small padding makes the
+    resulting masks cover ascenders/descenders comfortably.
+    """
+    if not rects:
+        return []
+
+    # group into lines by vertical-center proximity
+    rects = sorted(rects, key=lambda r: (r[1] + r[3] / 2, r[0]))
+    lines: list[list[list[float]]] = []
+    for r in rects:
+        cy = r[1] + r[3] / 2
+        placed = False
+        for line in lines:
+            ly = sum(s[1] + s[3] / 2 for s in line) / len(line)
+            lh = max(s[3] for s in line)
+            if abs(cy - ly) < max(lh, r[3]) * 0.5:
+                line.append(r)
+                placed = True
+                break
+        if not placed:
+            lines.append([r])
+
+    merged: list[tuple] = []
+    for line in lines:
+        line.sort(key=lambda r: r[0])
+        cur = list(line[0])
+        for seg in line[1:]:
+            gap = seg[0] - (cur[0] + cur[2])
+            if gap < max(cur[3], seg[3]) * 1.0:
+                right = max(cur[0] + cur[2], seg[0] + seg[2])
+                top = min(cur[1], seg[1])
+                bottom = max(cur[1] + cur[3], seg[1] + seg[3])
+                cur = [cur[0], top, right - cur[0], bottom - top]
+            else:
+                merged.append(tuple(cur))
+                cur = list(seg)
+        merged.append(tuple(cur))
+
+    padded = []
+    for x, y, w, h in merged:
+        pad = h * 0.15
+        padded.append((max(0.0, x - pad), max(0.0, y - pad),
+                       w + pad * 2, h + pad * 2))
+    return padded
