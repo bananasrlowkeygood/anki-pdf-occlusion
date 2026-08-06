@@ -43,6 +43,7 @@ ADDON_FILES = [
     "manifest.json",
     "icon.svg",
     "caret.svg",
+    "caret_muted.svg",
 ]
 
 
