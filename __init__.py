@@ -7,7 +7,7 @@ from .pdf_renderer import ensure_vendor_on_path
 ensure_vendor_on_path()
 
 from aqt import mw, gui_hooks
-from aqt.qt import QAction, QTimer
+from aqt.qt import QAction, QDesktopServices, QTimer, QUrl
 from aqt.editor import Editor
 
 
@@ -45,27 +45,39 @@ mw.form.menuTools.addAction(action)
 # The seen-version marker lives in user_files/ (preserved across add-on
 # updates) rather than in config, so config.json defaults stay live.
 
-TEMPLATE_VERSION = 3  # v3: Remarks field renamed to Notes; v2: flicker-free reveal
+# v5: explicit object-fit on the mask overlay (AnkiMobile alignment)
+# v4: Notes / Slides buttons + the two PDF-path fields behind them
+# v3: Remarks field renamed to Notes; v2: flicker-free reveal
+TEMPLATE_VERSION = 5
+
+# Bumped when already-written media files need rewriting, as opposed to the
+# card templates. Unlike a template change this needs no permission and can't
+# be declined — it repairs files that are simply wrong.
+# v2: re-register those files through col.media — v1 wrote them directly,
+#     which left Anki's media DB holding the old checksums, so they were
+#     never marked dirty and never reached AnkiWeb or the phone
+# v1: viewBox on mask SVGs so AnkiMobile scales them to the slide
+MEDIA_VERSION = 2
 
 
-def _template_version_file() -> str:
+def _marker_file(name: str) -> str:
     d = os.path.join(os.path.dirname(__file__), "user_files")
     os.makedirs(d, exist_ok=True)
-    return os.path.join(d, "template_version")
+    return os.path.join(d, name)
 
 
-def _seen_template_version() -> int:
+def _seen_version(marker: str) -> int:
     try:
-        with open(_template_version_file()) as f:
+        with open(_marker_file(marker)) as f:
             return int(f.read().strip())
     except (OSError, ValueError):
         return 0
 
 
-def _record_template_version() -> None:
+def _record_version(marker: str, value: int) -> None:
     try:
-        with open(_template_version_file(), "w") as f:
-            f.write(str(TEMPLATE_VERSION))
+        with open(_marker_file(marker), "w") as f:
+            f.write(str(value))
     except OSError:
         pass
 
@@ -74,7 +86,7 @@ def _maybe_offer_template_upgrade() -> None:
     from aqt.utils import askUser
     from .card_builder import ensure_note_type
 
-    if _seen_template_version() >= TEMPLATE_VERSION:
+    if _seen_version("template_version") >= TEMPLATE_VERSION:
         return
 
     cfg = _get_config()
@@ -84,17 +96,66 @@ def _maybe_offer_template_upgrade() -> None:
         and (mw.col.models.by_name(name) or mw.col.models.by_name("PDF Image Occlusion"))
     )
     if has_notes and askUser(
-        "PDF Occlusion's card templates were updated.\n"
-        "Update your existing cards now?",
+        "PDF Occlusion's card templates were updated — this release fixes "
+        "masks sitting slightly off the slide on AnkiMobile, and adds Notes "
+        "and Slides buttons that open the source PDFs.\n\n"
+        "Update your existing cards now?\n"
+        "(if your cards predate the Notes/Slides buttons this adds two "
+        "fields to the note type, so Anki will ask for a one-time full sync)",
         title="PDF Occlusion",
     ):
         ensure_note_type(mw.col, name)
         mw.reset()
     # Record either way — never nag on every startup.
-    _record_template_version()
+    _record_version("template_version", TEMPLATE_VERSION)
 
 
-gui_hooks.profile_did_open.append(_maybe_offer_template_upgrade)
+def _migrate_media() -> None:
+    """Repair mask files written by older versions.
+
+    Runs before the template prompt so that if the user accepts it, the CSS
+    and the files it depends on land together. Rewriting media only queues
+    the files for upload — it can't push them — so the user is told to sync
+    rather than left wondering why their phone hasn't changed.
+    """
+    from aqt.utils import tooltip
+    from .card_builder import repair_mask_media
+
+    seen = _seen_version("media_version")
+    if not mw.col or seen >= MEDIA_VERSION:
+        return
+    # Progress is best-effort — a failure to show it must not stop the repair.
+    try:
+        mw.progress.start(label="PDF Occlusion: repairing masks…")
+    except Exception:
+        pass
+    try:
+        # A collection already through v1 has correct files on disk but stale
+        # media-DB entries, so those need rewriting too.
+        res = repair_mask_media(mw.col, reregister=seen >= 1)
+    except Exception:
+        return  # leave the marker unset so the next launch retries
+    finally:
+        try:
+            mw.progress.finish()
+        except Exception:
+            pass
+    _record_version("media_version", MEDIA_VERSION)
+
+    if res["registered"]:
+        msg = (f"PDF Occlusion repaired {res['registered']} mask files — "
+               f"sync to update your other devices.")
+        if res["failed"]:
+            msg += f" ({res['failed']} could not be rewritten.)"
+        tooltip(msg, period=6000)
+
+
+def _on_profile_did_open() -> None:
+    _migrate_media()
+    _maybe_offer_template_upgrade()
+
+
+gui_hooks.profile_did_open.append(_on_profile_did_open)
 
 
 # ── Editor toolbar button ─────────────────────────────────────────────────────
@@ -113,6 +174,73 @@ def _add_editor_button(buttons: list, editor: Editor) -> None:
 
 
 gui_hooks.editor_did_init_buttons.append(_add_editor_button)
+
+
+# ── Notes / Slides buttons on the card ────────────────────────────────────────
+#
+# The card templates only send back which document was asked for; the path
+# itself lives in the note's "Slides PDF" / "Notes PDF" field and is read here,
+# so nothing the webview says decides what gets opened. Works in the reviewer,
+# the browser preview and the card-layout preview — each supplies a different
+# bridge context, hence the three ways of reaching the note below.
+
+def _note_from_context(context):
+    card = getattr(context, "card", None)
+    if callable(card):          # Previewer.card() is a method
+        try:
+            card = card()
+        except Exception:
+            card = None
+    if card is None and mw.reviewer is not None:
+        card = mw.reviewer.card
+    if card is not None:
+        try:
+            return card.note()
+        except Exception:
+            return None
+    return getattr(context, "note", None)  # card layout
+
+
+def _open_linked_pdf(kind: str, context) -> None:
+    from aqt.utils import showWarning
+    from .card_builder import DOC_FIELD_BY_KIND, pdf_path_in
+
+    field = DOC_FIELD_BY_KIND.get(kind)
+    note = _note_from_context(context)
+    if not field or note is None:
+        return
+    label = "lecture notes" if kind == "notes" else "slides"
+    path = pdf_path_in(note[field]) if field in note else ""
+    if not path:
+        showWarning(
+            f"No {label} PDF is attached to this card.\n\n"
+            "Open the PDF Occlusion window, load the deck this card came "
+            "from, attach the PDF and click Create All Cards."
+        )
+        return
+    if os.path.splitext(path)[1].lower() != ".pdf":
+        showWarning(f"This card's {label} link is not a PDF:\n{path}")
+        return
+    if not os.path.exists(path):
+        showWarning(
+            f"The {label} PDF can no longer be found:\n{path}\n\n"
+            "It was moved or renamed. Re-attach it in the PDF Occlusion "
+            "window and click Create All Cards to update these cards."
+        )
+        return
+    QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+
+def _on_js_message(handled, message: str, context):
+    from .card_builder import JS_PREFIX
+
+    if not isinstance(message, str) or not message.startswith(JS_PREFIX):
+        return handled
+    _open_linked_pdf(message[len(JS_PREFIX):], context)
+    return (True, None)
+
+
+gui_hooks.webview_did_receive_js_message.append(_on_js_message)
 
 
 # ── Auto-cleanup media when our notes are deleted ─────────────────────────────

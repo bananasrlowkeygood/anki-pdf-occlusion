@@ -3,9 +3,9 @@ Per-PDF session persistence.
 
 Each opened PDF gets one JSON file in user_files/sessions/ (user_files/ is
 preserved across add-on updates). A session stores everything needed to
-resume work — boxes, skipped slides, per-slide mode overrides, lecture name —
-plus the region→note-id map that lets "Create All Cards" update existing
-cards in place instead of duplicating them.
+resume work — boxes, skipped slides, per-slide mode overrides, lecture name,
+the attached lecture-notes PDF — plus the region→note-id map that lets
+"Create All Cards" update existing cards in place instead of duplicating them.
 
 Files are keyed by a hash of the absolute PDF path; the path itself is stored
 inside the file so a hash collision can never resurrect the wrong session.

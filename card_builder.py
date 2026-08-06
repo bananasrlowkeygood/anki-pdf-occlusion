@@ -18,6 +18,7 @@ import html
 import os
 import re
 import uuid
+from typing import Optional
 
 from aqt.qt import QImage
 
@@ -75,6 +76,33 @@ _FRONT_TMPL = """\
 })();
 </script>"""
 
+# Source documents. Both hold an absolute filesystem path, not a copy of the
+# PDF: lecture decks run to tens of MB and copying them into collection.media
+# would wreck AnkiWeb sync. The paths are opened by the desktop add-on (see
+# __init__._open_linked_pdf); on mobile the buttons are simply inert.
+SLIDES_PDF_FIELD = "Slides PDF"
+NOTES_PDF_FIELD = "Notes PDF"
+DOC_FIELDS = (SLIDES_PDF_FIELD, NOTES_PDF_FIELD)
+
+# pycmd messages the buttons send back to the add-on. Only the kind travels
+# through JS — the path itself is read from the note on the Python side.
+JS_PREFIX = "pdfocc:open:"
+DOC_FIELD_BY_KIND = {"slides": SLIDES_PDF_FIELD, "notes": NOTES_PDF_FIELD}
+
+# Rendered only when the matching field is filled, so a card without notes
+# attached shows no dead button. pycmd is guarded: it doesn't exist in every
+# webview, and on mobile the message goes nowhere.
+_DOC_BTN_TMPL = """\
+  {{#%(field)s}}<button class="io-doc-btn" onclick="
+    if (typeof pycmd === 'function') pycmd('%(prefix)s%(kind)s');
+  ">%(label)s</button>{{/%(field)s}}"""
+
+_DOC_BUTTONS = "\n".join(
+    _DOC_BTN_TMPL % {"field": DOC_FIELD_BY_KIND[kind], "prefix": JS_PREFIX,
+                     "kind": kind, "label": label}
+    for kind, label in (("notes", "Notes"), ("slides", "Slides"))
+)
+
 # The back shows the answer mask directly as the overlay — no JS src swap, and
 # nothing is hidden via JS, so a card can never get stuck blank (e.g. on mobile).
 _BACK_TMPL = """\
@@ -114,7 +142,20 @@ _BACK_TMPL = """\
       this.textContent = 'Hide All';
     }
   ">Show All</button>
+@@DOC_BUTTONS@@
 </div>"""
+
+
+def _back_tmpl(with_docs: bool) -> str:
+    """Back template, with the Notes/Slides buttons only if the fields exist.
+
+    A {{#Field}} section for a field the note type doesn't have renders as a
+    template error on every card, so the buttons are omitted entirely when the
+    user declined the schema change that adds them.
+    """
+    return _BACK_TMPL.replace("@@DOC_BUTTONS@@\n",
+                              _DOC_BUTTONS + "\n" if with_docs else "")
+
 
 _CSS = """\
 .card {
@@ -128,31 +169,53 @@ _CSS = """\
   background: #2c2c2e;
   color: #d6d6d6;
 }
+/* Mask alignment depends on the overlay image occupying exactly the same box
+   as the slide image. Anki desktop leaves the card's own layout alone, but
+   AnkiMobile ships a stylesheet that adds spacing to plain divs and images —
+   enough to push the mask off the slide by a constant offset while leaving it
+   the correct size (masks "shifted down" on iPad, fine on Mac). So every box
+   here zeroes margin/padding/border, and the mask is positioned absolutely
+   against the wrapper instead of being laid out in flow, which makes it
+   immune to padding on its own container. Don't drop these resets. */
 #io-wrapper {
   position: relative;
   display: inline-block;
   max-width: 100%;
+  margin: 0; padding: 0; border: 0;
 }
 #io-original {
   /* Hidden until the overlay mask has loaded (see template JS) so the
      unmasked slide never flashes on screen. Don't edit. */
   visibility: hidden;
+  margin: 0; padding: 0; border: 0;
 }
 #io-original img {
   display: block;
   max-width: 100%;
   height: auto;
+  margin: 0; padding: 0; border: 0;
 }
 #io-overlay {
   position: absolute;
-  top: 0; left: 0;
-  width: 100%;
+  top: 0; left: 0; right: 0; bottom: 0;
+  margin: 0; padding: 0; border: 0;
   pointer-events: none;
 }
 #io-overlay img {
+  /* width/height 100% of the wrapper, not the intrinsic ratio, so the mask
+     tracks the slide even if the client disagrees about the SVG's size.
+     object-fit is spelled out because `fill` is only the *initial* value — a
+     client stylesheet setting `contain` on images would letterbox the mask
+     inside this box and shift every rect. Same reasoning as the resets above:
+     state it, don't inherit it. The mask SVG carries a viewBox so it can
+     actually be stretched (see _svg). */
+  position: absolute;
+  top: 0; left: 0;
   display: block;
   width: 100%;
-  height: auto;
+  height: 100%;
+  object-fit: fill;
+  margin: 0; padding: 0; border: 0;
 }
 #io-preload {
   position: absolute;
@@ -177,6 +240,9 @@ _CSS = """\
   margin-top: 10px;
   text-align: center;
 }
+#io-toggle-bar button {
+  margin: 3px;
+}
 #io-toggle-btn {
   background: #836EAA;
   color: white;
@@ -196,6 +262,26 @@ _CSS = """\
 }
 .night_mode #io-toggle-btn:hover {
   background: #9885b8;
+}
+/* Quiet secondary buttons — same hairline/purple-tint treatment the add-on
+   dialog gives its non-primary buttons, so card and dialog read as one. */
+.io-doc-btn {
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  padding: 6px 16px;
+  border: 1px solid rgba(131, 110, 170, 0.55);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.io-doc-btn:hover {
+  background: rgba(131, 110, 170, 0.16);
+}
+.io-doc-btn:active {
+  background: rgba(131, 110, 170, 0.28);
+}
+.night_mode .io-doc-btn {
+  border-color: rgba(182, 172, 209, 0.6);
 }"""
 
 
@@ -226,6 +312,28 @@ def _migrate_field_format(col: Collection, nt: NotetypeDict) -> None:
         col.update_notes(updated)
 
 
+def _ensure_doc_fields(col: Collection, nt: NotetypeDict) -> bool:
+    """Add the Slides/Notes PDF fields to an existing note type.
+
+    Adding a field is a schema change, so Anki asks the user to accept a
+    one-time full sync. Returns False if they decline — the caller then
+    installs templates without the document buttons rather than leaving the
+    note type and its templates out of step.
+    """
+    mm = col.models
+    have = {f["name"] for f in nt["flds"]}
+    missing = [f for f in DOC_FIELDS if f not in have]
+    if not missing:
+        return True
+    try:
+        col.mod_schema(check=True)
+    except Exception:
+        return False
+    for fname in missing:
+        mm.add_field(nt, mm.new_field(fname))
+    return True
+
+
 def ensure_note_type(col: Collection, name: str = "PDF Occlusion") -> NotetypeDict:
     mm = col.models
     nt = mm.by_name(name)
@@ -246,23 +354,27 @@ def ensure_note_type(col: Collection, name: str = "PDF Occlusion") -> NotetypeDi
                 except Exception:
                     fld["name"] = "Notes"
                 break
+        has_docs = _ensure_doc_fields(col, nt)
         nt["css"] = _CSS
         for tmpl in nt["tmpls"]:
             tmpl["qfmt"] = _FRONT_TMPL
-            tmpl["afmt"] = _BACK_TMPL
+            tmpl["afmt"] = _back_tmpl(has_docs)
         mm.save(nt)
+        # adding fields invalidates the dict we hold — reload before use
+        nt = mm.by_name(name) or nt
         _migrate_field_format(col, nt)
         return nt
 
     nt = mm.new(name)
     nt["css"] = _CSS
 
-    for fname in ("Image", "Question Mask", "Answer Mask", "Header", "Notes"):
+    for fname in ("Image", "Question Mask", "Answer Mask", "Header", "Notes",
+                  *DOC_FIELDS):
         mm.add_field(nt, mm.new_field(fname))
 
     tmpl = mm.new_template("Card")
     tmpl["qfmt"] = _FRONT_TMPL
-    tmpl["afmt"] = _BACK_TMPL
+    tmpl["afmt"] = _back_tmpl(True)
     mm.add_template(nt, tmpl)
     mm.add(nt)
     return nt
@@ -330,10 +442,22 @@ def _split_regions(boxes: list[dict]) -> list[list[dict]]:
     return singles + list(groups.values())
 
 
+# The viewBox is what lets the mask stretch to whatever box the card CSS gives
+# it. Without one, the rect coordinates are plain px in the SVG's own viewport
+# and preserveAspectRatio does not apply at all, so a client is free to ignore
+# the `width/height: 100%` the card CSS asks for and scale the mask uniformly
+# to its 16:9 intrinsic size instead — which lands the boxes slightly small and
+# off-centre. Blink (Anki desktop, AnkiDroid) stretches anyway; WebKit
+# (AnkiMobile) is the strict one. With `viewBox` + `preserveAspectRatio="none"`
+# the mask maps corner-to-corner onto the img box everywhere, no guessing.
+#
+# Keep this string byte-identical to what add_viewbox() produces, or
+# every existing note will look "changed" on the next run and be rewritten.
 def _svg(W: int, H: int, rects: list[str]) -> bytes:
     body = "\n  ".join(rects)
     return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}">\n'
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}"'
+        f' viewBox="0 0 {W} {H}" preserveAspectRatio="none">\n'
         f'  {body}\n</svg>'
     ).encode("utf-8")
 
@@ -433,11 +557,121 @@ def _media_equals(col: Collection, fname: str, data: bytes) -> bool:
         return False
 
 
+# ------------------------------------------------- viewBox migration (v5)
+
+# Masks written before the viewBox fix are already in collection.media and
+# synced to AnkiWeb, so the generator change alone only helps cards made from
+# now on. These are patched in place rather than regenerated: the edit is a
+# root-tag rewrite that needs no note touched, keeps every filename, and so
+# costs a re-upload of ~1 KB files instead of a full sync.
+_SVG_ROOT_RE = re.compile(r'<svg\b([^>]*)>')
+_SVG_WH_RE = re.compile(r'\bwidth="(\d+(?:\.\d+)?)"\s+height="(\d+(?:\.\d+)?)"')
+
+
+# Optional[...] rather than `str | None`: the add-on supports back to Anki
+# 2.1.50, which runs Python 3.9, where PEP 604 unions in an annotation are a
+# TypeError at import time. Nothing else in this file uses them either.
+def add_viewbox(svg_text: str) -> Optional[str]:
+    """Add viewBox + preserveAspectRatio to a mask SVG's root tag.
+
+    Returns the rewritten text, or None if the file already has a viewBox or
+    doesn't look like one of ours (no width/height to derive the box from) —
+    in both cases the caller leaves it alone.
+    """
+    m = _SVG_ROOT_RE.search(svg_text)
+    if not m or "viewBox" in m.group(1):
+        return None
+    wh = _SVG_WH_RE.search(m.group(1))
+    if not wh:
+        return None
+    attrs = (f'{m.group(1)} viewBox="0 0 {wh.group(1)} {wh.group(2)}"'
+             f' preserveAspectRatio="none"')
+    return f'{svg_text[:m.start()]}<svg{attrs}>{svg_text[m.end():]}'
+
+
+def repair_mask_media(col: Collection, reregister: bool = False) -> dict:
+    """Give every mask SVG a viewBox, and make sure Anki knows it changed.
+
+    Rewrites go through col.media rather than a plain open(): writing the
+    file directly leaves Anki's media DB holding the old checksum, so the
+    file is never marked dirty, never uploads, and the other devices keep the
+    broken masks indefinitely. col.media.check() does NOT notice an
+    externally-edited file either — only a write through the media layer (or
+    a media sync's own scan) marks it.
+
+    write_data() can't be used on its own: handed a name that already exists
+    with different content it quietly stores the data under a *new* name, and
+    the note still points at the old one. Trashing the file first frees the
+    name so write_data() gives it straight back.
+
+    reregister rewrites files that are already correct on disk — needed for
+    collections patched by the first, direct-write version of this migration,
+    whose media DB entries are still stale.
+
+    Idempotent, and a no-op on a collection with no add-on cards.
+    Returns {"patched", "registered", "failed"}.
+    """
+    out = {"patched": 0, "registered": 0, "failed": 0}
+    try:
+        media_dir = col.media.dir()
+        names = os.listdir(media_dir)
+    except OSError:
+        return out
+
+    for name in names:
+        if not (name.startswith(_MEDIA_PREFIX) and name.endswith(".svg")):
+            continue
+        path = os.path.join(media_dir, name)
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except (OSError, UnicodeDecodeError):
+            continue  # leave anything unreadable alone rather than risk it
+        new_text = add_viewbox(text)
+        if new_text is None and not reregister:
+            continue
+        # Read fully before trashing, so a failure can't lose the only copy.
+        data = (text if new_text is None else new_text).encode("utf-8")
+        try:
+            col.media.trash_files([name])
+            got = col.media.write_data(name, data)
+        except Exception:
+            out["failed"] += 1
+            continue
+        if got != name:
+            # Shouldn't happen now the name is free, but the note still
+            # references `name` — put the data back there rather than leave
+            # the card pointing at a missing mask.
+            try:
+                os.replace(os.path.join(media_dir, got), path)
+            except OSError:
+                pass
+            out["failed"] += 1
+            continue
+        out["registered"] += 1
+        if new_text is not None:
+            out["patched"] += 1
+    return out
+
+
 def _notes_field_val(note) -> str:
     for f in ("Notes", "Remarks"):
         if f in note:
             return note[f]
     return ""
+
+
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def pdf_path_in(field_val: str) -> str:
+    """The filesystem path stored in a Slides/Notes PDF field.
+
+    Fields hold HTML, so the path goes in escaped; strip any tags the Browse
+    editor may have wrapped around it and unescape before handing it to the OS.
+    """
+    txt = html.unescape(_TAG_RE.sub("", field_val or ""))
+    return txt.replace("\u00a0", " ").strip()
 
 
 # ------------------------------------------------------------ note creation
@@ -490,6 +724,8 @@ def create_occlusion_notes(
     highlight_color: tuple = _DEFAULT_HIGHLIGHT_COLOR,
     lecture_name: str = "",
     total_slides: int = 0,
+    slides_pdf: str = "",
+    notes_pdf: str = "",
     default_mode: str = "ao",
     page_modes: dict = None,
     tags: list = None,
@@ -503,6 +739,11 @@ def create_occlusion_notes(
     run; matching regions have their existing notes updated in place, so
     review history survives edits. image_map maps page index (as str) to the
     already-saved slide PNG so re-runs don't duplicate slide images.
+
+    slides_pdf / notes_pdf are absolute paths to the source deck and the
+    lecture-notes PDF; they populate the fields behind the Slides and Notes
+    buttons on the card. Both are written on every run — including empty —
+    so detaching a notes PDF clears it from the cards too.
 
     Returns {"created", "updated", "unchanged", "note_map", "image_map",
     "stale_nids"} — stale_nids are notes whose region was deleted since the
@@ -519,6 +760,19 @@ def create_occlusion_notes(
     new_note_map: dict[str, int] = {}
     new_image_map: dict[str, str] = {}
     opacity = max(0.0, min(1.0, mask_opacity / 255))
+    doc_fields = {
+        SLIDES_PDF_FIELD: html.escape(slides_pdf or ""),
+        NOTES_PDF_FIELD: html.escape(notes_pdf or ""),
+    }
+
+    def _set_docs(n):
+        for fname, val in doc_fields.items():
+            if fname in n:
+                n[fname] = val
+
+    def _docs_match(n) -> bool:
+        return all(fname not in n or n[fname] == val
+                   for fname, val in doc_fields.items())
 
     for done, (page_idx, img, boxes) in enumerate(pages):
         if on_progress:
@@ -569,6 +823,7 @@ def create_occlusion_notes(
                         and note["Header"] == header_prefix
                         and (not remarks
                              or _notes_field_val(note) == remarks_html)
+                        and _docs_match(note)
                         and _media_equals(col, old_q[0], q_svg)
                         and _media_equals(col, old_a[0], a_svg)):
                     unchanged += 1
@@ -582,6 +837,7 @@ def create_occlusion_notes(
                 note["Answer Mask"] = f'<img src="{a_fname}">'
                 note["Header"] = header_prefix
                 _set_notes(note)
+                _set_docs(note)
                 for t in tags:
                     if t not in note.tags:
                         note.tags.append(t)
@@ -597,6 +853,7 @@ def create_occlusion_notes(
                 note["Answer Mask"] = f'<img src="{a_fname}">'
                 note["Header"] = header_prefix
                 _set_notes(note)
+                _set_docs(note)
                 note.tags.extend(tags)
                 col.add_note(note, deck_id)
                 created += 1

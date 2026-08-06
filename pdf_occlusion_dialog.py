@@ -6,7 +6,7 @@ from aqt.theme import theme_manager
 from aqt.qt import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QToolButton, QLabel,
     QLineEdit, QComboBox, QFileDialog, QScrollArea, QShortcut, QKeySequence,
-    Qt, QImage, QProgressDialog, QMenu,
+    Qt, QImage, QProgressDialog, QMenu, QDesktopServices, QUrl,
 )
 from aqt.utils import askUser, showInfo, showWarning
 
@@ -43,8 +43,11 @@ _PRIMARY_BTN_QSS = (
 # Split button: main area opens the file picker, the arrow lists recent
 # sessions. Same purple as the primary buttons. Qt's stock menu arrow is
 # huge, so a small bundled caret.svg replaces it.
-_CARET_PATH = os.path.join(
-    os.path.dirname(__file__), "caret.svg").replace("\\", "/")
+def _asset(name: str) -> str:
+    return os.path.join(os.path.dirname(__file__), name).replace("\\", "/")
+
+
+_CARET_PATH = _asset("caret.svg")
 _OPEN_BTN_QSS = (
     "QToolButton{background:#836EAA;color:white;font-weight:bold;"
     "padding:6px 18px 6px 16px;border-radius:6px;border:none;}"
@@ -68,6 +71,24 @@ _DIALOG_QSS = (
     "border-color:rgba(127,127,127,0.18);}"
     "QPushButton:checked{background:rgba(131,110,170,0.28);"
     "border-color:#836EAA;}"
+)
+
+# The notes-PDF attach control: a quiet split button matching the secondary
+# QPushButtons above (QSS selectors are per-class, so it needs its own copy).
+# Its caret is grey rather than the white one on the purple Open PDF button.
+_NOTES_BTN_QSS = (
+    "QToolButton{padding:5px 8px 5px 14px;border-radius:6px;"
+    "border:1px solid rgba(127,127,127,0.35);background:transparent;"
+    "text-align:left;}"
+    "QToolButton:hover{background:rgba(131,110,170,0.14);}"
+    "QToolButton:pressed{background:rgba(131,110,170,0.26);}"
+    "QToolButton:disabled{color:rgba(127,127,127,0.45);"
+    "border-color:rgba(127,127,127,0.18);}"
+    "QToolButton::menu-button{border:none;width:14px;"
+    "border-top-right-radius:6px;border-bottom-right-radius:6px;}"
+    "QToolButton::menu-button:hover{background:rgba(131,110,170,0.26);}"
+    f'QToolButton::menu-arrow{{image:url("{_asset("caret_muted.svg")}");'
+    "width:8px;height:5px;}"
 )
 
 
@@ -149,7 +170,6 @@ class PDFOcclusionDialog(QDialog):
         self._open_btn.setText("Open PDF")
         self._open_btn.setStyleSheet(_OPEN_BTN_QSS)
         self._open_btn.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        self._open_btn.setToolTip("Open PDFs · the arrow lists recent sessions")
         self._open_btn.clicked.connect(self._open_pdf)
         self._recent_menu = QMenu(self)
         self._recent_menu.aboutToShow.connect(self._fill_recent_menu)
@@ -198,8 +218,19 @@ class PDFOcclusionDialog(QDialog):
         self._deck_combo.setToolTip("Type a new name to create a deck")
         self._populate_decks()
 
+        self._notes_pdf_btn = QToolButton()
+        self._notes_pdf_btn.setStyleSheet(_NOTES_BTN_QSS)
+        self._notes_pdf_btn.setPopupMode(
+            QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self._notes_pdf_btn.setMinimumWidth(150)
+        self._notes_pdf_btn.clicked.connect(self._choose_notes_pdf)
+        self._notes_pdf_menu = QMenu(self)
+        self._notes_pdf_menu.aboutToShow.connect(self._fill_notes_pdf_menu)
+        self._notes_pdf_btn.setMenu(self._notes_pdf_menu)
+
         row2.addWidget(self._lecture_edit, stretch=3)
         row2.addWidget(self._deck_combo, stretch=2)
+        row2.addWidget(self._notes_pdf_btn, stretch=2)
         root.addLayout(row2)
 
         # ── Row 3: tools · detect · per-slide mode ────────────────────────
@@ -279,11 +310,43 @@ class PDFOcclusionDialog(QDialog):
         bot.addWidget(self._create_btn)
         root.addLayout(bot)
 
+        # ── Keep keyboard focus on the canvas ─────────────────────────────
+        # The canvas only receives key events while it holds focus, and it is
+        # given focus as soon as a PDF loads. But a QPushButton takes focus
+        # when clicked, so hitting Detect Text (or Draw, or Fit, or Next) used
+        # to leave focus on the button and silently kill every canvas key —
+        # arrows, Delete, G/U/N, Esc — until you clicked the slide again.
+        # These are tool-palette buttons, so they don't need focus at all;
+        # every one of them also has a keyboard shortcut (D, V, T, Ctrl+0,
+        # Ctrl+±, PgUp/PgDn, Space), so dropping them from the Tab chain
+        # doesn't put anything out of reach of the keyboard.
+        #
+        # Deliberately NOT in this list: the lecture field, the two combos and
+        # Open PDF / notes-PDF buttons, which do need focus to be usable — the
+        # first three because you type into them, the last two because they
+        # have no shortcut and would otherwise be mouse-only.
+        for w in (self._draw_btn, self._select_btn, self._detect_btn,
+                  self._zoom_out_btn, self._zoom_in_btn, self._fit_btn,
+                  self._prev_btn, self._skip_btn, self._next_btn):
+            w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # Clicking the grey margin around the slide targets the scroll area,
+        # not the canvas; without this it would take focus and cause the same
+        # dead-keys problem.
+        self._scroll.setFocusProxy(self._canvas)
+
         # ── Shortcuts ─────────────────────────────────────────────────────
-        # Left/Right live on the canvas (they nudge when boxes are selected);
-        # PgUp/PgDn always flip slides regardless of focus. Plain-letter
-        # shortcuts never fire while a text field has focus — the field
-        # consumes them first.
+        # Left/Right nudge the selection and otherwise flip slides. They're
+        # bound here as well as on the canvas because the canvas only sees key
+        # events while it holds focus — and flipping slides is exactly what you
+        # do before ever clicking on one. PgUp/PgDn always flip slides.
+        # None of these fire while a text field has focus: QLineEdit claims the
+        # arrows (and Ctrl+Z, and plain letters) for editing before Qt looks at
+        # window shortcuts, so typing a lecture name is unaffected.
+        for keys, key in (("Left", Qt.Key.Key_Left), ("Right", Qt.Key.Key_Right),
+                          ("Shift+Left", Qt.Key.Key_Left),
+                          ("Shift+Right", Qt.Key.Key_Right)):
+            QShortcut(QKeySequence(keys), self,
+                      lambda k=key, s=keys.startswith("Shift"): self._arrow(k, s))
         QShortcut(QKeySequence(Qt.Key.Key_PageUp), self, self._prev_page)
         QShortcut(QKeySequence(Qt.Key.Key_PageDown), self, self._next_page)
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, self._toggle_skip)
@@ -339,6 +402,66 @@ class PDFOcclusionDialog(QDialog):
         doc = self._doc_for_page(self._page_index)
         if doc:
             doc["lecture"] = text.strip()
+
+    # ---------------------------------------------------------- notes PDF --
+    #
+    # A separate lecture-notes PDF, attached per document. Its path (and the
+    # slide deck's) is written onto every card this document makes, so the
+    # Notes / Slides buttons on the back of the card can open them. Only the
+    # path is stored — the PDF is never copied into the collection.
+
+    def _notes_pdf(self) -> str:
+        doc = self._doc_for_page(self._page_index)
+        return doc.get("notes_pdf", "") if doc else ""
+
+    def _choose_notes_pdf(self):
+        doc = self._doc_for_page(self._page_index)
+        if not doc:
+            return
+        start_dir = os.path.dirname(doc.get("notes_pdf") or doc["path"])
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose lecture notes PDF", start_dir, "PDF Files (*.pdf)"
+        )
+        if path:
+            doc["notes_pdf"] = path
+            self._sync_notes_pdf_btn()
+
+    def _remove_notes_pdf(self):
+        doc = self._doc_for_page(self._page_index)
+        if doc:
+            doc["notes_pdf"] = ""
+            self._sync_notes_pdf_btn()
+
+    def _fill_notes_pdf_menu(self):
+        self._notes_pdf_menu.clear()
+        path = self._notes_pdf()
+        self._notes_pdf_menu.addAction(
+            "Choose PDF…" if not path else "Replace…", self._choose_notes_pdf)
+        act = self._notes_pdf_menu.addAction(
+            "Open", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(path)))
+        act.setEnabled(bool(path) and os.path.exists(path))
+        act = self._notes_pdf_menu.addAction("Remove", self._remove_notes_pdf)
+        act.setEnabled(bool(path))
+
+    def _sync_notes_pdf_btn(self):
+        """Reflect the current document's attachment on the button."""
+        self._notes_pdf_btn.setEnabled(bool(self._docs))
+        path = self._notes_pdf()
+        if not path:
+            self._notes_pdf_btn.setText("Notes PDF…")
+            self._notes_pdf_btn.setToolTip(
+                "Attach a lecture-notes PDF · the cards get a Notes button "
+                "that opens it"
+            )
+            return
+        name = os.path.basename(path)
+        if len(name) > 22:
+            name = name[:21] + "…"
+        missing = not os.path.exists(path)
+        self._notes_pdf_btn.setText(("⚠ " if missing else "") + name)
+        self._notes_pdf_btn.setToolTip(
+            path + ("\n\n(this file can no longer be found)" if missing else "")
+        )
 
     # ---------------------------------------------------------------- PDF --
 
@@ -429,6 +552,7 @@ class PDFOcclusionDialog(QDialog):
                 "lecture": os.path.splitext(os.path.basename(path))[0],
                 "start": len(all_pages),
                 "count": len(pages),
+                "notes_pdf": "",
                 "note_map": {},
                 "image_map": {},
             })
@@ -445,6 +569,8 @@ class PDFOcclusionDialog(QDialog):
 
         self._show_page()
         self._apply_default_zoom()
+        # so the arrows, Delete, G/U etc. reach the canvas without a click first
+        self._canvas.setFocus()
 
     # ------------------------------------------------------------- sessions --
 
@@ -453,7 +579,7 @@ class PDFOcclusionDialog(QDialog):
                     for i, doc in enumerate(self._docs)}
         resumable = {
             i: s for i, s in sessions.items()
-            if s and (s.get("boxes") or s.get("note_map"))
+            if s and (s.get("boxes") or s.get("note_map") or s.get("notes_pdf"))
         }
         if not resumable:
             return
@@ -503,6 +629,7 @@ class PDFOcclusionDialog(QDialog):
                     self._page_modes[doc["start"] + local] = m
 
             doc["lecture"] = s.get("lecture") or doc["lecture"]
+            doc["notes_pdf"] = s.get("notes_pdf") or ""
             doc["note_map"] = s.get("note_map") or {}
             # the slide PNGs only match if the render scale is unchanged
             doc["image_map"] = (s.get("image_map") or {}) if factor == 1.0 else {}
@@ -523,11 +650,12 @@ class PDFOcclusionDialog(QDialog):
                 for i in range(start, start + count)
                 if self._boxes.get(i)
             }
-            if not boxes and not doc.get("note_map"):
+            if not boxes and not doc.get("note_map") and not doc.get("notes_pdf"):
                 session_store.delete(doc["path"])
                 continue
             session_store.save(doc["path"], {
                 "lecture": doc["lecture"],
+                "notes_pdf": doc.get("notes_pdf", ""),
                 "boxes": boxes,
                 "skipped": sorted(
                     i - start for i in self._skipped if start <= i < start + count),
@@ -646,6 +774,10 @@ class PDFOcclusionDialog(QDialog):
         else:
             self._page_modes[self._page_index] = mode
 
+    def _arrow(self, key, shift: bool):
+        if self._pages:
+            self._canvas.handle_arrow(key, shift)
+
     def _on_slide_nav(self, direction: int):
         self._next_page() if direction > 0 else self._prev_page()
 
@@ -732,6 +864,7 @@ class PDFOcclusionDialog(QDialog):
         self._fit_btn.setEnabled(has)
         self._detect_btn.setEnabled(has)
         self._page_mode_combo.setEnabled(has)
+        self._sync_notes_pdf_btn()
 
         if has:
             idx = self._page_index
@@ -813,6 +946,8 @@ class PDFOcclusionDialog(QDialog):
                 highlight_color=highlight_color,
                 lecture_name=doc["lecture"],
                 total_slides=count,
+                slides_pdf=doc["path"],
+                notes_pdf=doc.get("notes_pdf", ""),
                 default_mode=mode,
                 page_modes=local_modes,
                 note_map=doc.get("note_map"),

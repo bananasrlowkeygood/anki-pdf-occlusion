@@ -874,6 +874,23 @@ class OcclusionCanvas(QWidget):
         self.boxes_changed.emit()
         self.update()
 
+    def handle_arrow(self, key, shift: bool = False):
+        """Arrow key: nudge the selection, or flip slides when nothing is selected.
+
+        Public because the dialog also binds Left/Right window-level — the
+        canvas only receives key events while it holds focus, and slide
+        navigation is the one thing you do before ever clicking the slide.
+        """
+        if self._selected:
+            step = _NUDGE_STEP_BIG if shift else _NUDGE_STEP
+            dx = {Qt.Key.Key_Left: -step, Qt.Key.Key_Right: step}.get(key, 0)
+            dy = {Qt.Key.Key_Up: -step, Qt.Key.Key_Down: step}.get(key, 0)
+            self._nudge(dx, dy)
+        elif key == Qt.Key.Key_Left:
+            self.slide_nav.emit(-1)
+        elif key == Qt.Key.Key_Right:
+            self.slide_nav.emit(+1)
+
     def keyPressEvent(self, event: QKeyEvent):
         key = event.key()
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
@@ -896,15 +913,7 @@ class OcclusionCanvas(QWidget):
             return
 
         if key in (Qt.Key.Key_Left, Qt.Key.Key_Right, Qt.Key.Key_Up, Qt.Key.Key_Down):
-            if self._selected:
-                step = _NUDGE_STEP_BIG if shift else _NUDGE_STEP
-                dx = {Qt.Key.Key_Left: -step, Qt.Key.Key_Right: step}.get(key, 0)
-                dy = {Qt.Key.Key_Up: -step, Qt.Key.Key_Down: step}.get(key, 0)
-                self._nudge(dx, dy)
-            elif key == Qt.Key.Key_Left:
-                self.slide_nav.emit(-1)
-            elif key == Qt.Key.Key_Right:
-                self.slide_nav.emit(+1)
+            self.handle_arrow(key, shift)
             return
 
         if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
