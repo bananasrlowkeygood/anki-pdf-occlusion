@@ -208,12 +208,26 @@ _CSS = """\
      client stylesheet setting `contain` on images would letterbox the mask
      inside this box and shift every rect. Same reasoning as the resets above:
      state it, don't inherit it. The mask SVG carries a viewBox so it can
-     actually be stretched (see _svg). */
+     actually be stretched (see _svg).
+
+     max-width/max-height are load-bearing, measured on an iPhone:
+     AnkiMobile's stylesheet clamps a bare <img> to 95% of its container.
+     The slide image never showed it because #io-original img below declares
+     max-width and so outranks that rule; the mask declared none, so it
+     rendered 353.4px inside a 372px box — vertically correct but squeezed
+     ~5% horizontally, sliding every rect left of the text it covers.
+     Declaring max-width here is what wins: this selector is (1,0,1) and the
+     client's bare `img` is (0,0,1). No !important — the fact that
+     #io-original img already beats the client rule proves it isn't
+     !important either, and marking width/height !important would only skew
+     the mask the other way if a client ever overrode `width` instead. */
   position: absolute;
   top: 0; left: 0;
   display: block;
   width: 100%;
   height: 100%;
+  max-width: none;
+  max-height: none;
   object-fit: fill;
   margin: 0; padding: 0; border: 0;
 }

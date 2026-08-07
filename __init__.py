@@ -45,10 +45,12 @@ mw.form.menuTools.addAction(action)
 # The seen-version marker lives in user_files/ (preserved across add-on
 # updates) rather than in config, so config.json defaults stay live.
 
+# v6: unclamp the mask overlay — AnkiMobile caps bare <img> at 95% of its
+#     container, which squeezed every mask ~5% horizontally on iOS
 # v5: explicit object-fit on the mask overlay (AnkiMobile alignment)
 # v4: Notes / Slides buttons + the two PDF-path fields behind them
 # v3: Remarks field renamed to Notes; v2: flicker-free reveal
-TEMPLATE_VERSION = 5
+TEMPLATE_VERSION = 6
 
 # Bumped when already-written media files need rewriting, as opposed to the
 # card templates. Unlike a template change this needs no permission and can't
