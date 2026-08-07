@@ -42,8 +42,10 @@ mw.form.menuTools.addAction(action)
 # on the next profile load they get a one-time offer to apply it. Declining
 # is fine too — templates are refreshed anyway the next time cards are
 # created (ensure_note_type runs then).
-# The seen-version marker lives in user_files/ (preserved across add-on
-# updates) rather than in config, so config.json defaults stay live.
+# Markers live in user_files/ (preserved across add-on updates) rather than in
+# config, so config.json defaults stay live. TEMPLATE_VERSION is NOT used to
+# decide whether the templates need updating — _notetype_is_current() asks the
+# note type itself. It only scopes a decline to one release.
 
 # v6: unclamp the mask overlay — AnkiMobile caps bare <img> at 95% of its
 #     container, which squeezed every mask ~5% horizontally on iOS
@@ -84,32 +86,63 @@ def _record_version(marker: str, value: int) -> None:
         pass
 
 
+def _notetype_is_current(nt) -> bool:
+    """Does the note type already hold what ensure_note_type would write?
+
+    Asking the note type rather than a version marker is the point. A marker
+    only records that we *asked*: it gets written whether the user accepts,
+    declines, or the update throws, so a fix that never landed looks applied
+    and is skipped forever. Comparing the real templates means a declined or
+    failed upgrade is simply noticed again next launch.
+    """
+    from .card_builder import DOC_FIELDS, _CSS, _FRONT_TMPL, _back_tmpl
+
+    names = {f["name"] for f in nt["flds"]}
+    if "Remarks" in names:          # pre-v3 field name, renamed on upgrade
+        return False
+    if nt.get("css") != _CSS:
+        return False
+    # Someone who declined the one-time full sync has no document fields and
+    # gets templates without the buttons — for them that IS up to date, so
+    # compare against the same thing ensure_note_type would write for them.
+    afmt = _back_tmpl(all(f in names for f in DOC_FIELDS))
+    return all(t.get("qfmt") == _FRONT_TMPL and t.get("afmt") == afmt
+               for t in nt["tmpls"])
+
+
 def _maybe_offer_template_upgrade() -> None:
     from aqt.utils import askUser
     from .card_builder import ensure_note_type
 
-    if _seen_version("template_version") >= TEMPLATE_VERSION:
+    if not mw.col:
         return
-
     cfg = _get_config()
     name = cfg.get("note_type_name", "PDF Occlusion")
-    has_notes = bool(
-        mw.col
-        and (mw.col.models.by_name(name) or mw.col.models.by_name("PDF Image Occlusion"))
-    )
-    if has_notes and askUser(
-        "PDF Occlusion's card templates were updated — this release fixes "
-        "masks sitting slightly off the slide on AnkiMobile, and adds Notes "
-        "and Slides buttons that open the source PDFs.\n\n"
+    nt = (mw.col.models.by_name(name)
+          or mw.col.models.by_name("PDF Image Occlusion"))
+    if nt is None:
+        return  # no cards yet — ensure_note_type runs when the first is made
+    if _notetype_is_current(nt):
+        return  # already applied, by us or by an earlier run
+
+    # Only the decline is remembered, and only for this release: enough to
+    # avoid nagging every startup, without burying the fix for good.
+    if _seen_version("declined_version") >= TEMPLATE_VERSION:
+        return
+
+    if askUser(
+        "PDF Occlusion's card templates were updated.\n\n"
+        "This release fixes occlusion masks rendering slightly narrow on "
+        "AnkiMobile, which left them shifted from the text they cover.\n\n"
         "Update your existing cards now?\n"
-        "(if your cards predate the Notes/Slides buttons this adds two "
+        "(if your cards predate the Notes/Slides buttons this also adds two "
         "fields to the note type, so Anki will ask for a one-time full sync)",
         title="PDF Occlusion",
     ):
         ensure_note_type(mw.col, name)
         mw.reset()
-    # Record either way — never nag on every startup.
-    _record_version("template_version", TEMPLATE_VERSION)
+    else:
+        _record_version("declined_version", TEMPLATE_VERSION)
 
 
 def _migrate_media() -> None:
