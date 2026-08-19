@@ -65,7 +65,8 @@ def find_note(nid: int) -> Optional[tuple]:
     """Locate a note across all sessions: (pdf_path, region_key) or None.
 
     Lets the editor button jump straight from a card in Browse to the
-    slide and box that produced it."""
+    slide and box that produced it — or, for a cloze card, to the slide
+    with that card loaded back into the composer."""
     try:
         names = os.listdir(_DIR)
     except OSError:
@@ -78,9 +79,16 @@ def find_note(nid: int) -> Optional[tuple]:
                 data = json.load(f)
         except (OSError, ValueError):
             continue
+        if not data.get("pdf_path"):
+            continue
         for key, mapped in (data.get("note_map") or {}).items():
-            if mapped == nid and data.get("pdf_path"):
+            if mapped == nid:
                 return data["pdf_path"], key
+        # cloze cards are keyed the same way, "<local page>:c:<record uid>"
+        for page, cards in (data.get("cloze_cards") or {}).items():
+            for card in cards:
+                if card.get("nid") == nid and card.get("uid"):
+                    return data["pdf_path"], f"{page}:c:{card['uid']}"
     return None
 
 

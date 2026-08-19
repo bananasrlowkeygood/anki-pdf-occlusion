@@ -10,7 +10,7 @@
 - **Grouping, notes, marquee selection, pinch-to-zoom**
 - **Sessions** — your work saves automatically per PDF; reopen it later and *Create All Cards* **updates the existing cards in place** (review history intact) instead of duplicating them
 - **Occlusion mode per PDF, per slide, or per box** — mix *Hide All, Show One* and *Hide One, Show One* freely
-- **Cloze composer** (`Ctrl+Shift+V`) — for slides that are too text-heavy to occlude, write a normal cloze card beside the slide with the slide kept underneath as the extra; the cards you've made stack up on the left
+- **Cloze composer** (`Ctrl+Shift+V`) — for slides that are too text-heavy to occlude, write a normal cloze card beside the slide with the slide kept underneath as the extra; the cards stack up on the left, editable, and are created by *Create All Cards* along with everything else
 
 ## Table of Contents
 
@@ -69,16 +69,26 @@
 Some slides are all prose — a wall of text where occlusion boxes would just be rectangles over sentences. Press `Ctrl+Shift+V` (or click `Cloze`) and a composer opens **to the right of the slide**, inside the window rather than floating over it:
 
 1. Type or paste the fact, select the part to test, and press `Ctrl+Shift+C` to wrap it in `{{c1::…}}`. `Ctrl+Alt+Shift+C` reuses the current number instead of taking a new one.
-2. **Add slide as extra** is on by default — the slide you're looking at is filed under the answer, captioned with the lecture and slide number. Click the thumbnail to turn it off.
-3. `Ctrl+Return` adds the card. It flies across to the **left of the slide** and stays there, truncated, so you can see at a glance what this slide has already produced. `Ctrl+Shift+V` again closes the composer and gives the room back to the slide.
+2. **Add slide as extra** is on by default — the slide you're looking at is filed under the answer, captioned with the lecture and slide number.
+3. `Ctrl+Return` files the card. It flies across to the **left of the slide** and stays there, truncated, with a count of how many cards it will make — one per `c` number. `Ctrl+Shift+V` again closes the composer and gives the room back to the slide.
 
-The cards on the left are per slide and are saved with the session, so they come back when you resume the PDF. Hovering one shows its full text. The composer always follows the slide the main window is on, so flipping slides re-aims it. Cards use your collection's ordinary **Cloze** note type — nothing add-on specific — so they keep working with or without PDF Occlusion installed, and several cards made from one slide share a single copy of the image.
+**Nothing is written to your collection until you press `Create All Cards`**, exactly like the boxes. Until then a cloze card is just a record you can rewrite or throw away, and the card counter at the bottom right counts it alongside the occlusion cards (`12 cards · 3 cloze`).
+
+On the cards to the left:
+
+- **Click** one to load it back into the composer and rewrite it — saving updates that same note, so review history survives.
+- **Right-click** for `Edit`, `Copy Text` and `Delete Card`. Deleting removes the record straight away; if it had already produced a note, that note is deleted the next time you create cards (you're asked first).
+- **Hover** for the full text.
+
+They're per slide and saved with the session, so they come back when you resume the PDF — and a cloze card made this way can be reopened later from Browse with the same `Ctrl+Shift+P` button that opens an occlusion card: it reopens the PDF at that slide with the card loaded into the composer.
+
+The composer follows the slide the main window is on, so flipping slides re-aims it. Cards use your collection's ordinary **Cloze** note type — nothing add-on specific — so they keep working with or without PDF Occlusion installed, and a slide used by both kinds of card is stored once.
 
 ## Sessions & Editing After Creation
 
 Your work is saved automatically per PDF (boxes, skipped slides, mode overrides, lecture name) when the dialog closes. Reopen the same PDF — via `Open PDF` or its recent-sessions arrow — and you'll be offered to resume.
 
-Because each box remembers which card it produced, **Create All Cards is safe to run again**: existing cards are *updated in place* (masks, header — with scheduling and review history untouched), new boxes become new cards, and if you deleted boxes you'll be asked whether to delete their cards too.
+Because each box remembers which card it produced, **Create All Cards is safe to run again**: existing cards are *updated in place* (masks, header — with scheduling and review history untouched), new boxes become new cards, and if you deleted boxes you'll be asked whether to delete their cards too. Cloze cards work the same way — rewriting one and creating again updates its note rather than adding a second.
 
 ## Occlusion Modes
 

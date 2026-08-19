@@ -947,6 +947,11 @@ def next_cloze_number(text: str) -> int:
     return max(nums) + 1 if nums else 1
 
 
+def cloze_card_count(text: str) -> int:
+    """How many cards this cloze text makes — one per distinct c-number."""
+    return len(set(re.findall(r"\{\{c(\d+)::", text or ""))) or 1
+
+
 def cloze_note_type(col: Collection) -> Optional[NotetypeDict]:
     """The collection's cloze note type — the stock "Cloze" when it is still
     there, otherwise whatever cloze-style type the user has."""
@@ -975,25 +980,15 @@ def _to_html(text: str) -> str:
     return html.escape(text or "").replace("\n", "<br>")
 
 
-def create_cloze_note(
+def _cloze_body(
     col: Collection,
-    deck_id: int,
-    note_type: NotetypeDict,
     text: str,
-    extra: str = "",
-    image: Optional[QImage] = None,
-    image_fname: str = "",
-    caption: str = "",
-    tags: list = None,
-) -> dict:
-    """Add one cloze note; returns {"note_id", "image_fname"}.
-
-    `image` is the slide to file under the answer. Pass back the returned
-    image_fname when making another card from the same slide and the PNG is
-    reused instead of written again.
-    """
-    text_field, extra_field = cloze_fields(note_type)
-
+    extra: str,
+    image: Optional[QImage],
+    image_fname: str,
+    caption: str,
+) -> tuple:
+    """(text html, extra html, image filename) for a cloze note."""
     parts = []
     if extra.strip():
         parts.append(_to_html(extra.strip()))
@@ -1008,11 +1003,82 @@ def create_cloze_note(
             )
     else:
         image_fname = ""
+    return _to_html(text), "<br>".join(parts), image_fname
 
-    note = col.new_note(note_type)
-    note[text_field] = _to_html(text)
-    if extra_field:
-        note[extra_field] = "<br>".join(parts)
-    note.tags.extend([t for t in (tags or []) if t])
-    col.add_note(note, deck_id)
-    return {"note_id": note.id, "image_fname": image_fname}
+
+def create_cloze_notes(
+    col: Collection,
+    deck_id: int,
+    note_type: NotetypeDict,
+    cards: list,
+    page_images: dict = None,
+    image_map: dict = None,
+    caption_for=None,
+) -> dict:
+    """Create or update one document's cloze notes.
+
+    Deliberately the same shape as create_occlusion_notes: nothing is
+    written until the user presses Create All Cards, a card that already has
+    a note id is rewritten in place (review history intact) rather than
+    duplicated, and a note whose fields would come out identical is left
+    completely alone.
+
+    `cards` are the stored records — {"text", "extra", "slide", "nid",
+    "page"} with page a local index into this document. `page_images` maps
+    that index to the slide QImage; `image_map` is the same slide-PNG cache
+    the occlusion notes use, so a slide filed under both kinds of card is
+    stored once.
+
+    Returns {"created", "updated", "unchanged", "cards", "image_map"} —
+    "cards" being the records with their note ids filled in.
+    """
+    page_images = page_images or {}
+    image_map = dict(image_map or {})
+    created = updated = unchanged = 0
+    out = []
+
+    for card in cards:
+        page = card.get("page")
+        want_slide = bool(card.get("slide", True))
+        img = page_images.get(page) if want_slide else None
+        caption = caption_for(page) if (caption_for and img is not None) else ""
+        text_html, extra_html, fname = _cloze_body(
+            col, card.get("text", ""), card.get("extra", ""),
+            img, image_map.get(str(page), ""), caption)
+        if img is not None and fname:
+            image_map[str(page)] = fname
+
+        note = None
+        nid = card.get("nid")
+        if nid:
+            try:
+                note = col.get_note(nid)
+            except Exception:
+                note = None      # deleted in Anki since — make it again
+
+        if note is not None:
+            text_field, extra_field = cloze_fields(note.note_type())
+            if (note[text_field] == text_html
+                    and (not extra_field or note[extra_field] == extra_html)):
+                unchanged += 1
+            else:
+                note[text_field] = text_html
+                if extra_field:
+                    note[extra_field] = extra_html
+                col.update_note(note)
+                updated += 1
+        else:
+            text_field, extra_field = cloze_fields(note_type)
+            note = col.new_note(note_type)
+            note[text_field] = text_html
+            if extra_field:
+                note[extra_field] = extra_html
+            col.add_note(note, deck_id)
+            created += 1
+
+        entry = dict(card)
+        entry["nid"] = int(note.id)
+        out.append(entry)
+
+    return {"created": created, "updated": updated, "unchanged": unchanged,
+            "cards": out, "image_map": image_map}

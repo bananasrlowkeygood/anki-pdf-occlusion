@@ -7,28 +7,29 @@ with the slide kept underneath as the extra, and that is what this is for:
 Ctrl+Shift+V opens the panel, you type the fact, wrap the bit to test, and
 Ctrl+Return files it.
 
-Both halves live inside the occlusion window rather than floating over it:
+The panel takes the top half of the window's height and no more, so the
+Add button never crowds Create All Cards below it. Both halves live inside
+the occlusion window rather than floating over it:
 a separate window covers the very slide you are reading from, and has to be
 moved out of the way by hand every time. On creation the card flies across
 to the left column and stays there, truncated, as a record of what this
 slide has already produced — per slide, and saved with the session.
 
-Notes are plain Cloze notes (see card_builder.create_cloze_note), so they
-survive this add-on being removed.
+Notes are plain Cloze notes, written by Create All Cards along with the
+occlusion ones (see card_builder.create_cloze_notes) — nothing here touches
+the collection — so they survive this add-on being removed.
 """
 import re
+import uuid
 from typing import Optional
 
-from aqt import mw
 from aqt.qt import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox,
-    QPlainTextEdit, QLineEdit, QFrame, QPixmap, QPainter, QPainterPath,
-    QPropertyAnimation, QEasingCurve, QPoint, QRect, QRectF, QSize, Qt,
-    QShortcut, QKeySequence, QTextCursor, QTimer, QScrollArea, QEvent,
-    QFontMetrics, QGraphicsOpacityEffect, QSizePolicy, pyqtSignal,
+    QPlainTextEdit, QLineEdit, QFrame, QPropertyAnimation, QEasingCurve,
+    QPoint, QRect, Qt, QShortcut, QKeySequence, QTextCursor, QTimer,
+    QScrollArea, QEvent, QGraphicsOpacityEffect, QSizePolicy, QMenu,
+    QApplication, pyqtSignal,
 )
-from aqt.utils import showWarning
-
 from . import card_builder
 
 
@@ -39,7 +40,7 @@ _CHIP_CHARS = 78       # how much of a card's text a chip keeps
 
 _QSS = f"""
 #clozeTitle {{ font-size: 14px; font-weight: bold; }}
-#clozeSlide, #clozeHint, #clozeDeck {{
+#clozeSlide, #clozeHint {{
     color: rgba(127,127,127,0.95); font-size: 11px;
 }}
 #clozeStatus {{ font-size: 11px; font-weight: bold; }}
@@ -54,10 +55,6 @@ QLineEdit {{
     border-radius: 8px; padding: 5px 8px; background: transparent;
 }}
 QLineEdit:focus {{ border: 1px solid {_PURPLE}; }}
-#slideCard {{
-    border: 1px solid rgba(127,127,127,0.25); border-radius: 10px;
-}}
-#slideCard:hover {{ border-color: {_PURPLE}; }}
 QCheckBox {{ font-size: 12px; }}
 QPushButton#clozeAdd {{
     background: {_PURPLE}; color: white; font-weight: bold;
@@ -75,6 +72,7 @@ QFrame#clozeCard {{
     border-radius: 7px;
 }}
 QLabel {{ font-size: 11px; }}
+QLabel#chipCount {{ color: rgba(127,127,127,0.85); font-size: 10px; }}
 """
 
 
@@ -89,27 +87,22 @@ def _plain(text: str) -> str:
     return re.sub(r"\s+", " ", out).strip()
 
 
-def _rounded(pm: QPixmap, radius: int = 6) -> QPixmap:
-    """Round a thumbnail's corners so the slide sits in the panel as a card."""
-    out = QPixmap(pm.size())
-    out.fill(Qt.GlobalColor.transparent)
-    p = QPainter(out)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    path = QPainterPath()
-    path.addRoundedRect(QRectF(0, 0, pm.width(), pm.height()), radius, radius)
-    p.setClipPath(path)
-    p.drawPixmap(0, 0, pm)
-    p.end()
-    return out
-
-
 # ------------------------------------------------------------------- column
 
 class ClozeChip(QFrame):
-    """One made card, truncated. The full text is on the tooltip."""
+    """One made card, truncated. The full text is on the tooltip.
 
-    def __init__(self, text: str, parent=None):
+    Click to load it back into the composer, right-click for the rest.
+    `entry` is the stored card record, or None for the throwaway copy that
+    does the flying.
+    """
+
+    activated = pyqtSignal(object)
+    delete_requested = pyqtSignal(object)
+
+    def __init__(self, text: str, parent=None, entry: Optional[dict] = None):
         super().__init__(parent)
+        self.entry = entry
         self.setObjectName("clozeCard")
         self.setStyleSheet(_CHIP_QSS)
         lay = QVBoxLayout(self)
@@ -127,13 +120,47 @@ class ClozeChip(QFrame):
         label.setFixedWidth(inner)
         label.setFixedHeight(label.heightForWidth(inner))
         lay.addWidget(label)
+
+        n = card_builder.cloze_card_count(text)
+        count = QLabel(f"{n} card{'s' if n != 1 else ''}")
+        count.setObjectName("chipCount")
+        count.setAlignment(Qt.AlignmentFlag.AlignRight)
+        lay.addWidget(count)
+
         self.setSizePolicy(QSizePolicy.Policy.Preferred,
                            QSizePolicy.Policy.Fixed)
-        self.setToolTip(full)
+        self._full = full
+        self.setToolTip(full if entry is None else
+                        full + "\n\nClick to edit · right-click for more")
+        if entry is not None:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mouseReleaseEvent(self, event):
+        if (self.entry is not None
+                and event.button() == Qt.MouseButton.LeftButton
+                and self.rect().contains(event.pos())):
+            self.activated.emit(self.entry)
+        super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event):
+        if self.entry is None:
+            return
+        menu = QMenu(self)
+        menu.addAction("Edit…", lambda: self.activated.emit(self.entry))
+        menu.addAction(
+            "Copy Text",
+            lambda: QApplication.clipboard().setText(self.entry["text"]))
+        menu.addSeparator()
+        menu.addAction("Delete Card…",
+                       lambda: self.delete_requested.emit(self.entry))
+        menu.exec(event.globalPos())
 
 
 class ClozeColumn(QWidget):
     """The cards made from the slide on screen, newest last."""
+
+    card_activated = pyqtSignal(object)
+    card_delete_requested = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -173,15 +200,20 @@ class ClozeColumn(QWidget):
                 w.setParent(None)
                 w.deleteLater()
         for card in cards:
-            self._list.insertWidget(self._list.count() - 1,
-                                    ClozeChip(card["text"]))
+            self._list.insertWidget(self._list.count() - 1, self._chip(card))
         n = len(cards)
         self._count.setText(f"{n} cloze card{'s' if n != 1 else ''}")
         self.setVisible(n > 0)
 
+    def _chip(self, card: dict) -> ClozeChip:
+        chip = ClozeChip(card["text"], entry=card)
+        chip.activated.connect(self.card_activated)
+        chip.delete_requested.connect(self.card_delete_requested)
+        return chip
+
     def add_card(self, card: dict) -> ClozeChip:
         """Append one card and hand back its chip (hidden, for the fly-in)."""
-        chip = ClozeChip(card["text"])
+        chip = self._chip(card)
         effect = QGraphicsOpacityEffect(chip)
         effect.setOpacity(0.0)
         chip.setGraphicsEffect(effect)
@@ -202,11 +234,13 @@ class ClozeComposer(QWidget):
     """Right-hand panel; `owner` is the PDFOcclusionDialog it reads slides from."""
 
     card_created = pyqtSignal(dict)
+    card_updated = pyqtSignal(dict)
 
     def __init__(self, owner):
         super().__init__(owner)
         self._owner = owner
         self._added = 0
+        self._editing: Optional[dict] = None
         self.setFixedWidth(PANEL_W)
         self.setStyleSheet(_QSS)
         self._build_ui()
@@ -219,11 +253,11 @@ class ClozeComposer(QWidget):
         root.setSpacing(8)
 
         head = QHBoxLayout()
-        title = QLabel("Cloze")
-        title.setObjectName("clozeTitle")
+        self._title = QLabel("Cloze")
+        self._title.setObjectName("clozeTitle")
         self._slide_label = QLabel("")
         self._slide_label.setObjectName("clozeSlide")
-        head.addWidget(title)
+        head.addWidget(self._title)
         head.addStretch()
         head.addWidget(self._slide_label)
         root.addLayout(head)
@@ -244,42 +278,29 @@ class ClozeComposer(QWidget):
         self._extra.installEventFilter(self)   # Return adds, never "Create All"
         root.addWidget(self._extra)
 
-        # ── the slide, as the card's extra ────────────────────────────────
-        card = QFrame()
-        card.setObjectName("slideCard")
-        card.setCursor(Qt.CursorShape.PointingHandCursor)
-        cl = QVBoxLayout(card)
-        cl.setContentsMargins(10, 10, 10, 8)
-        cl.setSpacing(7)
-        self._thumb = QLabel()
-        self._thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._slide_check = QCheckBox("Add slide as extra")
         self._slide_check.setChecked(True)
-        self._slide_check.toggled.connect(self._sync_thumb_state)
-        self._caption = QLabel("")
-        self._caption.setObjectName("clozeHint")
-        self._caption.setStyleSheet("color:rgba(127,127,127,0.95);font-size:11px;")
-        cl.addWidget(self._thumb)
-        cl.addWidget(self._slide_check)
-        cl.addWidget(self._caption)
-        # the whole card is the hit target, not just the checkbox
-        card.mousePressEvent = lambda _e: self._slide_check.toggle()
-        root.addWidget(card)
-
-        self._deck_label = QLabel("")
-        self._deck_label.setObjectName("clozeDeck")
-        root.addWidget(self._deck_label)
+        self._slide_check.setToolTip(
+            "File this slide under the answer, captioned with the lecture "
+            "and slide number")
+        root.addWidget(self._slide_check)
 
         foot = QHBoxLayout()
         self._status = QLabel("")
         self._status.setObjectName("clozeStatus")
         self._status.setWordWrap(True)
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setAutoDefault(False)
+        self._cancel_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._cancel_btn.setVisible(False)
+        self._cancel_btn.clicked.connect(self.reset_editing)
         self._add_btn = QPushButton(f"Add Card  {_native('Ctrl+Return')}")
         self._add_btn.setObjectName("clozeAdd")
         self._add_btn.setAutoDefault(False)
         self._add_btn.setDefault(False)
         self._add_btn.clicked.connect(self._add)
         foot.addWidget(self._status, stretch=1)
+        foot.addWidget(self._cancel_btn)
         foot.addWidget(self._add_btn)
         root.addLayout(foot)
 
@@ -303,34 +324,57 @@ class ClozeComposer(QWidget):
     def focus_editor(self):
         self._text.setFocus()
 
+    # ------------------------------------------------------------- editing
+
+    def editing_uid(self) -> Optional[str]:
+        """Which stored card is in the panel, if any. Records are keyed by
+        their own uid, not a note id — they may not have a note yet."""
+        return self._editing.get("uid") if self._editing else None
+
+    def load_card(self, entry: dict):
+        """Put an already-made card back in the panel to be rewritten."""
+        self._editing = dict(entry)
+        self._text.setPlainText(entry.get("text", ""))
+        self._extra.setText(entry.get("extra", ""))
+        self._slide_check.setChecked(bool(entry.get("slide", True)))
+        self._title.setText("Editing card")
+        self._add_btn.setText(f"Save  {_native('Ctrl+Return')}")
+        self._cancel_btn.setVisible(True)
+        self.refresh_slide()
+        self._text.setFocus()
+        self._text.moveCursor(QTextCursor.MoveOperation.End)
+
+    def reset_editing(self):
+        """Back to composing a new card."""
+        self._editing = None
+        self._text.clear()
+        self._extra.clear()
+        self._slide_check.setChecked(True)
+        self._title.setText("Cloze")
+        self._add_btn.setText(f"Add Card  {_native('Ctrl+Return')}")
+        self._cancel_btn.setVisible(False)
+        self.refresh_slide()
+        self._text.setFocus()
+
+    def _slide_info(self) -> Optional[dict]:
+        """The slide this card belongs to — the one being edited keeps its
+        own, so flipping slides mid-edit can't swap the image under it."""
+        page = self._editing.get("page") if self._editing else None
+        return self._owner.cloze_slide(page)
+
     # -------------------------------------------------------------- slide
 
     def refresh_slide(self):
         """Re-aim at whatever slide the main window is showing."""
-        info = self._owner.cloze_slide()
+        info = self._slide_info()
         if not info:
             self._slide_label.setText("")
-            self._thumb.clear()
-            self._caption.setText("")
             return
-        self._slide_label.setText(info["label"])
-        self._caption.setText(info["caption"])
-        width = PANEL_W - 46
-        pm = QPixmap.fromImage(info["image"]).scaled(
-            QSize(width, width), Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation)
-        self._thumb.setPixmap(_rounded(pm))
-        self._sync_thumb_state()
-
-        deck = self._owner.cloze_deck_name() or "Current deck"
-        self._deck_label.setToolTip(deck)
-        self._deck_label.setText("→ " + QFontMetrics(self._deck_label.font())
-                                 .elidedText(deck, Qt.TextElideMode.ElideLeft,
-                                             PANEL_W - 40))
-
-    def _sync_thumb_state(self):
-        # unchecked reads as "this slide is not coming along" — dim it
-        self._thumb.setEnabled(self._slide_check.isChecked())
+        # The panel says which slide only while editing, where the card's
+        # slide can differ from the one on screen. Otherwise the window's own
+        # counter, the thumbnail and the deck picker already say it.
+        self._slide_label.setText(
+            f"from {info['label']}" if self._editing else "")
 
     # -------------------------------------------------------------- cloze
 
@@ -360,6 +404,9 @@ class ClozeComposer(QWidget):
                           if self._status.text() == msg else None)
 
     def _add(self):
+        """Put the card on the pile. Nothing reaches the collection here —
+        cloze cards are written by Create All Cards along with everything
+        else, so a session can be closed, resumed and rewritten first."""
         text = self._text.toPlainText().strip()
         if not text:
             self._say("Nothing to add yet.", ok=False)
@@ -369,46 +416,28 @@ class ClozeComposer(QWidget):
                       ok=False)
             return
 
-        note_type = card_builder.cloze_note_type(mw.col)
-        if note_type is None:
-            showWarning(
-                "No cloze note type found in this collection.\n\n"
-                "Add Anki's stock “Cloze” note type "
-                "(Tools → Manage Note Types → Add) and try again."
-            )
-            return
-
-        info = self._owner.cloze_slide()
-        deck_name = self._owner.cloze_deck_name()
-        deck_id = (mw.col.decks.id(deck_name) if deck_name
-                   else mw.col.decks.selected())
-
-        use_slide = self._slide_check.isChecked() and info is not None
-        try:
-            result = card_builder.create_cloze_note(
-                mw.col, deck_id, note_type, text,
-                extra=self._extra.text(),
-                image=info["image"] if use_slide else None,
-                image_fname=info["image_fname"] if use_slide else "",
-                caption=info["caption"] if use_slide else "",
-            )
-        except Exception as exc:
-            showWarning(f"Could not create the cloze card:\n{exc}")
-            return
-
-        if use_slide and result["image_fname"]:
-            self._owner.remember_cloze_image(info["page"], result["image_fname"])
-
-        self._added += 1
-        self._text.clear()
-        self._extra.clear()
-        self._text.setFocus()
-        self._say(f"Added · {self._added} this session")
-        self.card_created.emit({
-            "nid": int(result["note_id"]),
+        info = self._slide_info()
+        editing = self._editing
+        card = {
+            "uid": editing.get("uid") if editing else uuid.uuid4().hex,
+            "nid": editing.get("nid") if editing else None,
             "text": text,
-            "page": info["page"] if info else -1,
-        })
+            "extra": self._extra.text(),
+            "slide": bool(self._slide_check.isChecked()),
+            "page": (editing.get("page") if editing
+                     else (info["page"] if info else -1)),
+        }
+        if editing:
+            self.reset_editing()
+            self._say("Saved")
+            self.card_updated.emit(card)
+        else:
+            self._added += 1
+            self._text.clear()
+            self._extra.clear()
+            self._text.setFocus()
+            self._say(f"Added · {self._added} this session")
+            self.card_created.emit(card)
 
     # ------------------------------------------------------------ fly-in
 

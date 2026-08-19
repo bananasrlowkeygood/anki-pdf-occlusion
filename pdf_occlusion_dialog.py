@@ -4,7 +4,7 @@ from typing import Optional
 from aqt import mw
 from aqt.theme import theme_manager
 from aqt.qt import (
-    QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QToolButton, QLabel,
+    QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QToolButton, QLabel,
     QLineEdit, QComboBox, QFileDialog, QScrollArea, QShortcut, QKeySequence,
     Qt, QImage, QProgressDialog, QMenu, QDesktopServices, QUrl, QTimer,
 )
@@ -13,7 +13,9 @@ from aqt.utils import askUser, showInfo, showWarning
 from . import session_store
 from .cloze_dialog import ClozeColumn, ClozeComposer, fly_to_chip
 from .occlusion_canvas import OcclusionCanvas
-from .card_builder import ensure_note_type, create_occlusion_notes
+from .card_builder import (ensure_note_type, create_occlusion_notes,
+                           create_cloze_notes, cloze_note_type,
+                           cloze_card_count)
 from .pdf_renderer import render_pdf, get_text_line_rects
 
 
@@ -117,12 +119,11 @@ class PDFOcclusionDialog(QDialog):
         self._boxes: dict[int, list[dict]] = {}
         self._page_modes: dict[int, str] = {}   # global page idx -> "ao"/"oa"
         # Cloze: the composer is a panel to the right of the slide, the
-        # cards it has made are chips to the left of it, per slide.
-        # _cloze_images caches the slide PNG each card was filed with, so
-        # several cards off one slide share one file.
-        self._cloze_images: dict[int, str] = {}
+        # cards written from it are chips to the left, per slide. Like the
+        # boxes, they are only records until Create All Cards runs —
+        # _cloze_stale holds the notes of records deleted since.
         self._cloze_cards: dict[int, list] = {}
-        self._cloze_added = 0
+        self._cloze_stale: list[int] = []
         self._fly = None            # in-flight card animation, kept alive
         self._fitted = False        # is the current zoom a fit? (see _refit)
 
@@ -161,7 +162,12 @@ class PDFOcclusionDialog(QDialog):
         self._save_current_boxes()
         self._page_index = doc["start"] + local
         self._show_page()
-        if kind == "b":
+        if kind == "c":
+            for card in self._cloze_cards.get(self._page_index, []):
+                if card.get("uid") == ident:
+                    self._on_cloze_activated(card)
+                    return
+        elif kind == "b":
             self._canvas.select_region(box_id=ident)
         else:
             self._canvas.select_region(group_uid=ident)
@@ -302,15 +308,26 @@ class PDFOcclusionDialog(QDialog):
         self._cloze_column = ClozeColumn()
         self._cloze_column.setVisible(False)
         self._cloze = ClozeComposer(self)
-        self._cloze.setVisible(False)
+        # The panel is capped at half the slide's height and pinned to the
+        # top of its side, so the Add button can't end up next to Create All
+        # Cards — two buttons that do very different things.
+        self._cloze_side = QWidget()
+        side = QVBoxLayout(self._cloze_side)
+        side.setContentsMargins(0, 0, 0, 0)
+        side.addWidget(self._cloze)
+        side.addStretch()
+        self._cloze_side.setVisible(False)
         self._cloze.card_created.connect(self._on_cloze_created)
+        self._cloze.card_updated.connect(self._on_cloze_updated)
+        self._cloze_column.card_activated.connect(self._on_cloze_activated)
+        self._cloze_column.card_delete_requested.connect(self._on_cloze_delete)
 
         mid = QHBoxLayout()
         mid.setContentsMargins(0, 0, 0, 0)
         mid.setSpacing(8)
         mid.addWidget(self._cloze_column)
         mid.addWidget(self._scroll, stretch=1)
-        mid.addWidget(self._cloze)
+        mid.addWidget(self._cloze_side)
         root.addLayout(mid, stretch=1)
 
         # ── Bottom nav / create ───────────────────────────────────────────
@@ -655,6 +672,8 @@ class PDFOcclusionDialog(QDialog):
                         b["h"] = int(b["h"] * factor)
                 self._boxes[doc["start"] + local] = blist
 
+            self._cloze_stale += [int(n) for n in (s.get("cloze_stale") or [])]
+
             for k, cards in (s.get("cloze_cards") or {}).items():
                 try:
                     local = int(k)
@@ -702,8 +721,8 @@ class PDFOcclusionDialog(QDialog):
                 for i in range(start, start + count)
                 if self._cloze_cards.get(i)
             }
-            if (not boxes and not cloze_cards and not doc.get("note_map")
-                    and not doc.get("notes_pdf")):
+            if (not boxes and not cloze_cards and not self._cloze_stale
+                    and not doc.get("note_map") and not doc.get("notes_pdf")):
                 session_store.delete(doc["path"])
                 continue
             session_store.save(doc["path"], {
@@ -718,6 +737,7 @@ class PDFOcclusionDialog(QDialog):
                 "note_map": doc.get("note_map", {}),
                 "image_map": doc.get("image_map", {}),
                 "cloze_cards": cloze_cards,
+                "cloze_stale": [n for n in self._cloze_stale],
                 "render_scale": self._render_scale,
                 "page_count": count,
                 "deck": self._deck_combo.currentText().strip(),
@@ -726,10 +746,6 @@ class PDFOcclusionDialog(QDialog):
     def done(self, result: int):
         # runs on accept, reject (Esc) and window close — work is never lost
         self._persist_sessions()
-        # One refresh for the whole session's cloze cards — the main window
-        # is behind a modal dialog until now anyway.
-        if self._cloze_added:
-            mw.reset()
         super().done(result)
 
     # ---------------------------------------------------------------- zoom --
@@ -825,7 +841,7 @@ class PDFOcclusionDialog(QDialog):
         self._refresh_count()
         if self._cloze.isVisible():
             self._cloze.refresh_slide()
-        self._cloze_column.set_cards(self._cloze_cards.get(self._page_index, []))
+        self._refresh_cloze_column()
 
     def _sync_page_mode_combo(self):
         """Show the slide's effective mode: its override, else the config default."""
@@ -917,12 +933,27 @@ class PDFOcclusionDialog(QDialog):
             total += len(gids) + sum(1 for b in boxes if b.get("group") is None)
         return total
 
+    def _cloze_cards_total(self) -> int:
+        """Cards the cloze notes made — one per c-number, every slide."""
+        return sum(cloze_card_count(c["text"])
+                   for cards in self._cloze_cards.values() for c in cards)
+
     def _refresh_count(self):
         if not self._pages:
             self._count_label.setText("")
+            self._count_label.setToolTip("")
             return
-        n = self._expected_cards()
-        self._count_label.setText(f"{n} card{'s' if n != 1 else ''}")
+        occlusion = self._expected_cards()
+        cloze = self._cloze_cards_total()
+        n = occlusion + cloze
+        self._count_label.setText(
+            f"{n} card{'s' if n != 1 else ''}"
+            + (f"  ·  {cloze} cloze" if cloze else ""))
+        self._count_label.setToolTip(
+            f"{occlusion} occlusion card{'s' if occlusion != 1 else ''}"
+            + (f"\n{cloze} cloze card{'s' if cloze != 1 else ''}" if cloze else "")
+            + "\nCreate All Cards writes both."
+        )
 
     def _update_controls(self):
         has = bool(self._pages)
@@ -961,12 +992,26 @@ class PDFOcclusionDialog(QDialog):
     # non-modal panel (cloze_dialog.py); everything it needs about the
     # current slide comes through the three methods below.
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_panel_height()
+
+    def _sync_panel_height(self):
+        """Keep the composer to half the height the slide has."""
+        panel = getattr(self, "_cloze", None)
+        if panel is None:
+            return
+        h = self._scroll.height()
+        if h > 0:
+            panel.setMaximumHeight(max(300, h // 2))
+
     def _open_cloze(self):
         """Ctrl+Shift+V — show or hide the composer panel."""
         if not self._pages:
             return
         showing = not self._cloze.isVisible()
-        self._cloze.setVisible(showing)
+        self._sync_panel_height()
+        self._cloze_side.setVisible(showing)
         if showing:
             self._cloze.refresh_slide()
             self._cloze.focus_editor()
@@ -974,12 +1019,26 @@ class PDFOcclusionDialog(QDialog):
             self._canvas.setFocus()
         self._refit()
 
+    def _refresh_cloze_column(self):
+        """Show this slide's cards. The column appears and disappears with
+        them, so the slide's room changes — hence the re-fit."""
+        self._cloze_column.set_cards(self._cloze_cards.get(self._page_index, []))
+        self._refit()
+
+    def _find_cloze(self, uid: str):
+        """(page, index) of a stored card, or (None, None)."""
+        for page, cards in self._cloze_cards.items():
+            for i, card in enumerate(cards):
+                if card.get("uid") == uid:
+                    return page, i
+        return None, None
+
     def _on_cloze_created(self, card: dict):
         """File the new card against its slide and send it to the column."""
         page = card.get("page", self._page_index)
-        entry = {"nid": card["nid"], "text": card["text"]}
+        entry = dict(card)
         self._cloze_cards.setdefault(page, []).append(entry)
-        self._cloze_added += 1
+        self._refresh_count()
         if page != self._page_index:
             return
         chip = self._cloze_column.add_card(entry)
@@ -992,30 +1051,62 @@ class PDFOcclusionDialog(QDialog):
 
         QTimer.singleShot(0, fly)   # let the column lay the chip out first
 
+    def _on_cloze_activated(self, entry: dict):
+        """A chip was clicked — put that card back in the panel to edit."""
+        if not self._cloze.isVisible():
+            self._open_cloze()
+        self._cloze.load_card(entry)
+
+    def _on_cloze_updated(self, card: dict):
+        page, i = self._find_cloze(card.get("uid"))
+        if page is None:
+            return
+        entry = dict(card)
+        entry["page"] = page
+        self._cloze_cards[page][i] = entry
+        self._refresh_cloze_column()
+        self._refresh_count()
+
+    def _on_cloze_delete(self, entry: dict):
+        n = cloze_card_count(entry.get("text", ""))
+        made = bool(entry.get("nid"))
+        if not askUser(
+            f"Remove this cloze card ({n} card{'s' if n != 1 else ''})?"
+            + ("\n\nIts note is deleted the next time you create cards."
+               if made else ""),
+            title="PDF Occlusion",
+        ):
+            return
+        page, i = self._find_cloze(entry.get("uid"))
+        if page is not None:
+            del self._cloze_cards[page][i]
+            if not self._cloze_cards[page]:
+                del self._cloze_cards[page]
+        if made:
+            self._cloze_stale.append(int(entry["nid"]))
+        if self._cloze.editing_uid() == entry.get("uid"):
+            self._cloze.reset_editing()
+        self._refresh_cloze_column()
+        self._refresh_count()
+
     def cloze_deck_name(self) -> str:
         return self._deck_combo.currentText().strip()
 
-    def cloze_slide(self) -> Optional[dict]:
-        """Everything the composer needs about the slide on screen."""
+    def cloze_slide(self, page: Optional[int] = None) -> Optional[dict]:
+        """Which slide a card belongs to — the one on screen unless asked
+        for another (a card being edited keeps its own)."""
         if not self._pages:
             return None
-        idx = self._page_index
+        idx = self._page_index if page is None else page
+        if not 0 <= idx < len(self._pages):
+            idx = self._page_index
+        return {"page": idx, "label": self._slide_label_for(idx)}
+
+    def _slide_label_for(self, idx: int) -> str:
         doc = self._doc_for_page(idx)
         local = idx - doc["start"] if doc else idx
         total = doc["count"] if doc else len(self._pages)
-        lecture = (doc["lecture"] if doc else "").strip()
-        slide = f"Slide {local + 1}/{total}"
-        return {
-            "page": idx,
-            "image": self._pages[idx],
-            "label": slide,
-            "caption": f"{lecture} · {slide}" if lecture else slide,
-            "image_fname": self._cloze_images.get(idx, ""),
-        }
-
-    def remember_cloze_image(self, page_idx: int, fname: str):
-        """Reuse one slide PNG for every cloze card made from that slide."""
-        self._cloze_images[page_idx] = fname
+        return f"Slide {local + 1}/{total}"
 
     # -------------------------------------------------------- card creation --
 
@@ -1033,13 +1124,22 @@ class PDFOcclusionDialog(QDialog):
                 for i in range(start, start + count)
                 if i not in self._skipped and self._boxes.get(i)
             ]
-            if to_create:
-                per_doc.append((doc, to_create))
+            # Cloze cards are written by hand, one at a time, so a skipped
+            # slide doesn't discard them the way it discards its boxes.
+            cloze = []
+            for i in range(start, start + count):
+                for card in self._cloze_cards.get(i, []):
+                    entry = dict(card)
+                    entry["page"] = i - start
+                    cloze.append(entry)
+            if to_create or cloze:
+                per_doc.append((doc, to_create, cloze))
 
         if not per_doc:
             showWarning(
-                "No occlusion boxes found on any non-skipped slide.\n"
-                "Draw at least one box on a slide to create cards."
+                "Nothing to create yet.\n\n"
+                "Draw a box on a slide, or write a cloze card "
+                "(Ctrl+Shift+V)."
             )
             return
 
@@ -1053,17 +1153,28 @@ class PDFOcclusionDialog(QDialog):
         mask_opacity = int(_cfg("mask_opacity", 255))
         highlight_color = tuple(_cfg("highlight_color", [131, 110, 170]))
 
-        grand_total = sum(len(tc) for _, tc in per_doc)
+        grand_total = sum(len(tc) for _, tc, _c in per_doc)
         progress = QProgressDialog("Creating cards…", None, 0, grand_total, self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(300)
 
-        note_type = ensure_note_type(mw.col, note_type_name)
+        # Only when there are boxes: a cloze-only session shouldn't plant
+        # the occlusion note type in a collection that has never used it.
+        note_type = (ensure_note_type(mw.col, note_type_name)
+                     if any(tc for _, tc, _c in per_doc) else None)
 
-        created = updated = unchanged = slides = 0
-        stale_nids: list[int] = []
+        cloze_type = cloze_note_type(mw.col)
+        if cloze_type is None and any(cloze for _, _, cloze in per_doc):
+            showWarning(
+                "No cloze note type found in this collection, so the cloze "
+                "cards were skipped.\n\nAdd Anki's stock “Cloze” note type "
+                "(Tools → Manage Note Types → Add) and create again."
+            )
+
+        created = updated = unchanged = slides = cloze_made = 0
+        stale_nids: list[int] = list(self._cloze_stale)
         offset = 0
-        for doc, to_create in per_doc:
+        for doc, to_create, cloze in per_doc:
             start, count = doc["start"], doc["count"]
             local_modes = {
                 str(i - start): m for i, m in self._page_modes.items()
@@ -1074,21 +1185,26 @@ class PDFOcclusionDialog(QDialog):
                 progress.setValue(_off + done)
                 mw.app.processEvents()
 
-            result = create_occlusion_notes(
-                mw.col, deck_id, note_type, to_create,
-                mask_color=mask_color,
-                mask_opacity=mask_opacity,
-                highlight_color=highlight_color,
-                lecture_name=doc["lecture"],
-                total_slides=count,
-                slides_pdf=doc["path"],
-                notes_pdf=doc.get("notes_pdf", ""),
-                default_mode=mode,
-                page_modes=local_modes,
-                note_map=doc.get("note_map"),
-                image_map=doc.get("image_map"),
-                on_progress=on_progress,
-            )
+            result = {"created": 0, "updated": 0, "unchanged": 0,
+                      "note_map": doc.get("note_map", {}),
+                      "image_map": doc.get("image_map", {}),
+                      "stale_nids": []}
+            if to_create:
+                result = create_occlusion_notes(
+                    mw.col, deck_id, note_type, to_create,
+                    mask_color=mask_color,
+                    mask_opacity=mask_opacity,
+                    highlight_color=highlight_color,
+                    lecture_name=doc["lecture"],
+                    total_slides=count,
+                    slides_pdf=doc["path"],
+                    notes_pdf=doc.get("notes_pdf", ""),
+                    default_mode=mode,
+                    page_modes=local_modes,
+                    note_map=doc.get("note_map"),
+                    image_map=doc.get("image_map"),
+                    on_progress=on_progress,
+                )
             doc["note_map"] = result["note_map"]
             doc["image_map"] = result["image_map"]
             created += result["created"]
@@ -1098,15 +1214,42 @@ class PDFOcclusionDialog(QDialog):
             slides += len(to_create)
             offset += len(to_create)
 
+            if cloze and cloze_type is not None:
+                def caption_for(local, _doc=doc, _count=count):
+                    label = f"Slide {local + 1}/{_count}"
+                    lecture = (_doc.get("lecture") or "").strip()
+                    return f"{lecture} · {label}" if lecture else label
+
+                cres = create_cloze_notes(
+                    mw.col, deck_id, cloze_type, cloze,
+                    page_images={c["page"]: self._pages[start + c["page"]]
+                                 for c in cloze},
+                    image_map=doc.get("image_map"),
+                    caption_for=caption_for,
+                )
+                doc["image_map"] = cres["image_map"]
+                # hand the new note ids back to the records they came from
+                by_uid = {c.get("uid"): c["nid"] for c in cres["cards"]}
+                for i in range(start, start + count):
+                    for card in self._cloze_cards.get(i, []):
+                        if card.get("uid") in by_uid:
+                            card["nid"] = by_uid[card["uid"]]
+                created += cres["created"]
+                updated += cres["updated"]
+                unchanged += cres["unchanged"]
+                cloze_made += cres["created"] + cres["updated"]
+
         progress.close()
 
         deleted = 0
         if stale_nids and askUser(
-            f"Delete {len(stale_nids)} card(s) whose boxes were removed?",
+            f"Delete {len(stale_nids)} note(s) whose boxes or cloze cards "
+            "were removed?",
             title="PDF Occlusion",
         ):
             mw.col.remove_notes(stale_nids)
             deleted = len(stale_nids)
+        self._cloze_stale = []
 
         mw.col.reset()
         mw.reset()
@@ -1126,6 +1269,8 @@ class PDFOcclusionDialog(QDialog):
             if unchanged:
                 bits.append(f"{unchanged} unchanged")
             msg = "Cards: " + ", ".join(bits) + "."
+        if cloze_made:
+            msg += f"\n\n{cloze_made} of them cloze."
         showInfo(msg)
         if _cfg("close_after_creating", True):
             self.accept()
