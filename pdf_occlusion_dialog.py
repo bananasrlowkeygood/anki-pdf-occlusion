@@ -1,4 +1,5 @@
 import os
+import uuid
 from typing import Optional
 
 from aqt import mw
@@ -680,7 +681,18 @@ class PDFOcclusionDialog(QDialog):
                 except ValueError:
                     continue
                 if cards and 0 <= local < doc["count"]:
-                    self._cloze_cards[doc["start"] + local] = list(cards)
+                    page = doc["start"] + local
+                    restored = []
+                    for card in cards:
+                        entry = dict(card)
+                        # Sessions written before records had their own id
+                        # get one now — without it every such record keys on
+                        # None, and they collide with each other.
+                        entry.setdefault("uid", uuid.uuid4().hex)
+                        entry.setdefault("nid", None)
+                        entry["page"] = page
+                        restored.append(entry)
+                    self._cloze_cards[page] = restored
 
             for local in s.get("skipped", []):
                 if 0 <= int(local) < doc["count"]:
@@ -1229,17 +1241,24 @@ class PDFOcclusionDialog(QDialog):
                 )
                 doc["image_map"] = cres["image_map"]
                 # hand the new note ids back to the records they came from
-                by_uid = {c.get("uid"): c["nid"] for c in cres["cards"]}
+                by_uid = {c["uid"]: c["nid"] for c in cres["cards"]
+                          if c.get("uid")}
                 for i in range(start, start + count):
                     for card in self._cloze_cards.get(i, []):
-                        if card.get("uid") in by_uid:
-                            card["nid"] = by_uid[card["uid"]]
+                        uid = card.get("uid")
+                        if uid and uid in by_uid:
+                            card["nid"] = by_uid[uid]
                 created += cres["created"]
                 updated += cres["updated"]
                 unchanged += cres["unchanged"]
                 cloze_made += cres["created"] + cres["updated"]
 
         progress.close()
+
+        # The records now know their note ids. Get that to disk before
+        # anything else can go wrong — losing it would mean creating every
+        # one of these notes a second time on the next run.
+        self._persist_sessions()
 
         deleted = 0
         if stale_nids and askUser(

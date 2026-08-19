@@ -1039,15 +1039,6 @@ def create_cloze_notes(
 
     for card in cards:
         page = card.get("page")
-        want_slide = bool(card.get("slide", True))
-        img = page_images.get(page) if want_slide else None
-        caption = caption_for(page) if (caption_for and img is not None) else ""
-        text_html, extra_html, fname = _cloze_body(
-            col, card.get("text", ""), card.get("extra", ""),
-            img, image_map.get(str(page), ""), caption)
-        if img is not None and fname:
-            image_map[str(page)] = fname
-
         note = None
         nid = card.get("nid")
         if nid:
@@ -1056,14 +1047,31 @@ def create_cloze_notes(
             except Exception:
                 note = None      # deleted in Anki since — make it again
 
+        # A record saved before the composer kept the extra says nothing
+        # about it. Rebuilding the extra from that silence would wipe
+        # whatever is actually on the card, so for those the text is
+        # rewritten and the extra field is left exactly as it is.
+        legacy = (note is not None
+                  and "extra" not in card and "slide" not in card)
+
+        want_slide = bool(card.get("slide", True))
+        img = page_images.get(page) if (want_slide and not legacy) else None
+        caption = caption_for(page) if (caption_for and img is not None) else ""
+        text_html, extra_html, fname = _cloze_body(
+            col, card.get("text", ""), card.get("extra", ""),
+            img, image_map.get(str(page), ""), caption)
+        if img is not None and fname:
+            image_map[str(page)] = fname
+
         if note is not None:
             text_field, extra_field = cloze_fields(note.note_type())
             if (note[text_field] == text_html
-                    and (not extra_field or note[extra_field] == extra_html)):
+                    and (legacy or not extra_field
+                         or note[extra_field] == extra_html)):
                 unchanged += 1
             else:
                 note[text_field] = text_html
-                if extra_field:
+                if extra_field and not legacy:
                     note[extra_field] = extra_html
                 col.update_note(note)
                 updated += 1
