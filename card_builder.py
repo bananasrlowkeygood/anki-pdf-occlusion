@@ -399,11 +399,22 @@ def ensure_note_type(col: Collection, name: str = "PDF Occlusion") -> NotetypeDi
 def _rect(box: dict, fill: str, fill_opacity: float,
           stroke: str = "none", stroke_opacity: float = 1.0,
           stroke_width: float = 0) -> str:
-    """One SVG mask shape for a box — <rect> or <ellipse> per box["shape"]."""
+    """One SVG mask shape for a box — <rect> or <ellipse> per box["shape"].
+
+    A rotated box keeps its plain x/y/w/h and carries the angle as an SVG
+    rotate() about its own centre, exactly as the canvas draws it. Boxes
+    with no angle emit the same string they always have, so existing cards
+    don't all come out "updated" on the next run.
+    """
     common = f'fill="{fill}" fill-opacity="{fill_opacity}"'
     if stroke != "none":
         common += (f' stroke="{stroke}" stroke-opacity="{stroke_opacity}"'
                    f' stroke-width="{stroke_width}"')
+    angle = float(box.get("angle") or 0)
+    if angle:
+        common += (f' transform="rotate({angle:g}'
+                   f' {box["x"] + box["w"] / 2:g}'
+                   f' {box["y"] + box["h"] / 2:g})"')
     if box.get("shape") == "ellipse":
         cx = box["x"] + box["w"] / 2
         cy = box["y"] + box["h"] / 2
@@ -910,3 +921,98 @@ def create_occlusion_notes(
         "image_map": new_image_map,
         "stale_nids": stale_nids,
     }
+
+
+# ------------------------------------------------------------------- cloze
+#
+# The cloze composer (cloze_dialog.py) writes plain Cloze notes rather than a
+# private note type: text-heavy slides are better served by a normal cloze
+# card, and one that keeps working — and looking like every other cloze card
+# in the collection — with or without this add-on installed.
+
+try:
+    from anki.consts import MODEL_CLOZE
+except Exception:      # very old Anki
+    MODEL_CLOZE = 1
+
+_CLOZE_RE = re.compile(r"\{\{c\d+::")
+
+
+def has_cloze(text: str) -> bool:
+    return bool(_CLOZE_RE.search(text or ""))
+
+
+def next_cloze_number(text: str) -> int:
+    nums = [int(n) for n in re.findall(r"\{\{c(\d+)::", text or "")]
+    return max(nums) + 1 if nums else 1
+
+
+def cloze_note_type(col: Collection) -> Optional[NotetypeDict]:
+    """The collection's cloze note type — the stock "Cloze" when it is still
+    there, otherwise whatever cloze-style type the user has."""
+    nt = col.models.by_name("Cloze")
+    if nt and nt.get("type") == MODEL_CLOZE:
+        return nt
+    for meta in col.models.all_names_and_ids():
+        cand = col.models.get(meta.id)
+        if cand and cand.get("type") == MODEL_CLOZE:
+            return cand
+    return None
+
+
+def cloze_fields(note_type: NotetypeDict) -> tuple:
+    """(text field, extra field) of a cloze note type, tolerating renames."""
+    names = [f["name"] for f in note_type["flds"]]
+    text = "Text" if "Text" in names else names[0]
+    extra = next((n for n in ("Back Extra", "Extra", "Back") if n in names),
+                 None)
+    if extra is None:
+        extra = next((n for n in names if n != text), None)
+    return text, extra
+
+
+def _to_html(text: str) -> str:
+    return html.escape(text or "").replace("\n", "<br>")
+
+
+def create_cloze_note(
+    col: Collection,
+    deck_id: int,
+    note_type: NotetypeDict,
+    text: str,
+    extra: str = "",
+    image: Optional[QImage] = None,
+    image_fname: str = "",
+    caption: str = "",
+    tags: list = None,
+) -> dict:
+    """Add one cloze note; returns {"note_id", "image_fname"}.
+
+    `image` is the slide to file under the answer. Pass back the returned
+    image_fname when making another card from the same slide and the PNG is
+    reused instead of written again.
+    """
+    text_field, extra_field = cloze_fields(note_type)
+
+    parts = []
+    if extra.strip():
+        parts.append(_to_html(extra.strip()))
+    if image is not None:
+        if not _media_exists(col, image_fname):
+            image_fname = _save_media(col, qimage_to_png_bytes(image), ".png")
+        parts.append(f'<img src="{image_fname}">')
+        if caption:
+            parts.append(
+                '<div style="font-size:12px;opacity:0.6;margin-top:4px;">'
+                f'{html.escape(caption)}</div>'
+            )
+    else:
+        image_fname = ""
+
+    note = col.new_note(note_type)
+    note[text_field] = _to_html(text)
+    if extra_field:
+        note[extra_field] = "<br>".join(parts)
+    note.tags.extend([t for t in (tags or []) if t])
+    col.add_note(note, deck_id)
+    return {"note_id": note.id, "image_fname": image_fname}

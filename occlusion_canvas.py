@@ -12,6 +12,11 @@ Editing:
   - Drag a box to move it (multi-selection moves together)
   - Shift-drag a grouped box to move its whole group together
   - Drag any corner handle of a selected box to resize
+  - Drag an edge of a selected box to resize it horizontally or vertically
+    only. Edges have no drawn handle — hover one and the cursor changes.
+  - With the Select tool, drag just outside a corner to rotate the box (a
+    multi-selection turns together around its centre); Shift snaps to 15°.
+    Also hover-only. Draw keeps that space for starting the next box.
   - Arrow keys nudge selected boxes by 1 px (Shift = 10 px)
   - Ctrl+Z / Ctrl+Shift+Z (or Ctrl+Y) undo / redo
   - Ctrl+C / Ctrl+V copy / paste boxes — the clipboard survives slide
@@ -30,18 +35,20 @@ Grouping:
 
 Per-box data (kept in the box dicts, consumed by card_builder):
   - "shape": "rect" | "ellipse"
+  - "angle": rotation in degrees, clockwise about the box's centre
   - "mode":  None (follow slide/PDF default) | "ao" | "oa"
   - "note":  free text → card's Notes field
   - "id" / "group_uid": stable UUIDs so a re-created card can be updated
     in place instead of duplicated
 """
+import math
 import uuid
 from typing import Optional
 
 from aqt.qt import (
     QWidget, QPainter, QPen, QColor, QRect, QPoint, QPointF,
     QPixmap, QImage, Qt, QCursor, QMenu, QAction, QKeyEvent,
-    QInputDialog, QEvent, pyqtSignal,
+    QInputDialog, QEvent, QPolygonF, pyqtSignal,
 )
 
 # ------------------------------------------------------------------ colours
@@ -80,6 +87,28 @@ _NUDGE_STEP_BIG = 10
 _MAX_HISTORY = 100
 _DRAG_THRESHOLD = 4   # screen px before a press becomes a drag
 
+# Edge-resize and rotation are hover-only affordances: nothing is drawn for
+# them, the cursor is the entire hint. _EDGE_GRAB is the band either side of
+# an edge that starts a one-axis resize; _ROT_RING is how far past a corner
+# the rotate zone reaches (it starts where the corner handle ends).
+_EDGE_GRAB = 5        # screen px
+_ROT_RING = 18        # screen px
+_ROT_SNAP = 15        # degrees, while Shift is held
+
+# handle name -> (anchor corner that stays put, axes the drag is free to change)
+_RESIZE_HANDLES = {
+    "tl": ("br", "xy"), "tr": ("bl", "xy"),
+    "bl": ("tr", "xy"), "br": ("tl", "xy"),
+    "l":  ("br", "x"),  "r":  ("tl", "x"),
+    "t":  ("br", "y"),  "b":  ("tl", "y"),
+}
+
+# outward direction of each handle in the box's own frame, degrees clockwise
+# from +x (screen axes, y down). Used to pick a resize cursor that still
+# points the right way once the box is rotated.
+_HANDLE_DIR = {"l": 180, "r": 0, "t": -90, "b": 90,
+               "tl": -135, "tr": -45, "bl": 135, "br": 45}
+
 _MODE_LABELS = {"ao": "AO", "oa": "OA"}
 
 
@@ -95,17 +124,94 @@ def _pix_to_qpixmap(img: QImage) -> QPixmap:
     return QPixmap.fromImage(img)
 
 
+def _rot_vec(v: QPointF, deg: float) -> QPointF:
+    """Rotate a vector about the origin, clockwise (screen axes, y down)."""
+    if not deg:
+        return QPointF(v)
+    rad = math.radians(deg)
+    cos_a, sin_a = math.cos(rad), math.sin(rad)
+    return QPointF(v.x() * cos_a - v.y() * sin_a,
+                   v.x() * sin_a + v.y() * cos_a)
+
+
+def _dir_cursor(deg: float) -> QCursor:
+    """Resize cursor pointing along an outward direction in degrees."""
+    d = deg % 180
+    if d < 22.5 or d >= 157.5:
+        shape = Qt.CursorShape.SizeHorCursor
+    elif d < 67.5:
+        shape = Qt.CursorShape.SizeFDiagCursor    # "\\"
+    elif d < 112.5:
+        shape = Qt.CursorShape.SizeVerCursor
+    else:
+        shape = Qt.CursorShape.SizeBDiagCursor    # "/"
+    return QCursor(shape)
+
+
+_ROTATE_CURSOR: Optional[QCursor] = None
+
+
+def _rotate_cursor() -> QCursor:
+    """Curved-arrow cursor for the rotate zone, drawn once at first use.
+
+    Qt has no stock rotate cursor and the add-on ships no bitmap for one —
+    painting it here keeps it out of build.py's asset list, and lets it be a
+    dark arc inside a white halo so it stays visible on masks and slides
+    alike."""
+    global _ROTATE_CURSOR
+    if _ROTATE_CURSOR is None:
+        pm = QPixmap(26, 26)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        arc = QRect(6, 6, 14, 14)
+        head = QPolygonF([QPointF(19.5, 3.0), QPointF(19.5, 11.0),
+                          QPointF(12.5, 7.0)])
+        for color, width in ((QColor(255, 255, 255, 240), 5.0),
+                             (QColor(35, 35, 35, 245), 2.2)):
+            p.setPen(QPen(color, width, Qt.PenStyle.SolidLine,
+                          Qt.PenCapStyle.RoundCap))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawArc(arc, -40 * 16, 285 * 16)
+            p.setPen(QPen(color, width * 0.6))
+            p.setBrush(color)
+            p.drawPolygon(head)
+        p.end()
+        _ROTATE_CURSOR = QCursor(pm, 13, 13)
+    return _ROTATE_CURSOR
+
+
+def _local_handles(r: QRect) -> list[QRect]:
+    """Corner-handle rects for an unrotated screen rect (painting only —
+    the painter is already rotated when these are drawn)."""
+    s = _HANDLE_SIZE
+    return [QRect(r.left() - s,  r.top() - s,    s * 2, s * 2),
+            QRect(r.right() - s, r.top() - s,    s * 2, s * 2),
+            QRect(r.left() - s,  r.bottom() - s, s * 2, s * 2),
+            QRect(r.right() - s, r.bottom() - s, s * 2, s * 2)]
+
+
 # -------------------------------------------------------------------- _Box
 
 class _Box:
-    __slots__ = ("x", "y", "w", "h", "group", "group_uid",
+    """One occlusion box.
+
+    x/y/w/h are the *unrotated* rectangle in image space; `angle` turns it
+    clockwise about its own centre. Keeping the two apart means every edit
+    except rotation stays plain rectangle maths, and an unrotated box
+    serialises byte-identically to how it always has.
+    """
+
+    __slots__ = ("x", "y", "w", "h", "angle", "group", "group_uid",
                  "shape", "mode", "note", "id")
 
     def __init__(self, x: float, y: float, w: float, h: float,
                  group: Optional[int] = None, group_uid: Optional[str] = None,
                  shape: str = "rect", mode: Optional[str] = None,
-                 note: str = "", box_id: Optional[str] = None):
+                 note: str = "", box_id: Optional[str] = None,
+                 angle: float = 0.0):
         self.x, self.y, self.w, self.h = x, y, w, h
+        self.angle = float(angle or 0.0)
         self.group = group
         self.group_uid = group_uid
         self.shape = shape if shape in ("rect", "ellipse") else "rect"
@@ -118,51 +224,145 @@ class _Box:
         if w < 0: x += w; w = -w
         if h < 0: y += h; h = -h
         return _Box(x, y, w, h, self.group, self.group_uid,
-                    self.shape, self.mode, self.note, self.id)
+                    self.shape, self.mode, self.note, self.id, self.angle)
 
     def to_dict(self) -> dict:
         n = self.norm()
-        return {"x": int(n.x), "y": int(n.y),
-                "w": int(n.w), "h": int(n.h),
-                "group": self.group, "group_uid": self.group_uid,
-                "shape": self.shape, "mode": self.mode,
-                "note": self.note, "id": self.id}
+        d = {"x": int(n.x), "y": int(n.y),
+             "w": int(n.w), "h": int(n.h),
+             "group": self.group, "group_uid": self.group_uid,
+             "shape": self.shape, "mode": self.mode,
+             "note": self.note, "id": self.id}
+        # Only rotated boxes carry the key, so every card made before
+        # rotation existed still round-trips to the exact same dict (and so
+        # to the exact same mask SVG — no mass "updated" on the next run).
+        if self.angle:
+            d["angle"] = round(self.angle, 3)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "_Box":
         return cls(d["x"], d["y"], d["w"], d["h"],
                    d.get("group"), d.get("group_uid"),
                    d.get("shape", "rect"), d.get("mode"),
-                   d.get("note", ""), d.get("id"))
+                   d.get("note", ""), d.get("id"),
+                   d.get("angle", 0.0))
+
+    # -- geometry ---------------------------------------------------------
+
+    def centre(self) -> QPointF:
+        n = self.norm()
+        return QPointF(n.x + n.w / 2.0, n.y + n.h / 2.0)
+
+    def to_world(self, pt: QPointF) -> QPointF:
+        """Unrotated image point -> where it actually sits on the slide."""
+        if not self.angle:
+            return QPointF(pt)
+        c = self.centre()
+        return c + _rot_vec(pt - c, self.angle)
+
+    def to_local(self, pt: QPointF) -> QPointF:
+        """Slide point -> the box's own unrotated frame."""
+        if not self.angle:
+            return QPointF(pt)
+        c = self.centre()
+        return c + _rot_vec(pt - c, -self.angle)
+
+    def local_corner(self, name: str) -> QPointF:
+        n = self.norm()
+        return {
+            "tl": QPointF(n.x,       n.y),
+            "tr": QPointF(n.x + n.w, n.y),
+            "bl": QPointF(n.x,       n.y + n.h),
+            "br": QPointF(n.x + n.w, n.y + n.h),
+        }[name]
 
     def screen_rect(self, zoom: float) -> QRect:
+        """The unrotated rect in screen px — what the painter draws inside
+        the rotation transform."""
         n = self.norm()
         return QRect(int(n.x * zoom), int(n.y * zoom),
                      max(1, int(n.w * zoom)), max(1, int(n.h * zoom)))
 
+    def bounds_screen(self, zoom: float) -> QRect:
+        """Axis-aligned screen bounds of the box as it actually sits."""
+        if not self.angle:
+            return self.screen_rect(zoom)
+        pts = [self.to_world(self.local_corner(c))
+               for c in ("tl", "tr", "bl", "br")]
+        xs = [p.x() * zoom for p in pts]
+        ys = [p.y() * zoom for p in pts]
+        return QRect(int(min(xs)), int(min(ys)),
+                     max(1, int(max(xs) - min(xs))),
+                     max(1, int(max(ys) - min(ys))))
+
     def contains_screen(self, sx: int, sy: int, zoom: float) -> bool:
-        return self.screen_rect(zoom).contains(sx, sy)
+        n = self.norm()
+        p = self.to_local(QPointF(sx / zoom, sy / zoom))
+        return (n.x <= p.x() <= n.x + n.w) and (n.y <= p.y() <= n.y + n.h)
+
+    def corner_points(self, zoom: float) -> dict[str, QPoint]:
+        """Where the four corners land on screen, rotation included."""
+        out = {}
+        for name in ("tl", "tr", "bl", "br"):
+            w = self.to_world(self.local_corner(name))
+            out[name] = QPoint(int(round(w.x() * zoom)), int(round(w.y() * zoom)))
+        return out
 
     def corner_handles(self, zoom: float) -> dict[str, QRect]:
-        """Screen rects for the four corner resize handles."""
-        r = self.screen_rect(zoom)
+        """Screen rects for the four corner resize handles (hit testing)."""
         s = _HANDLE_SIZE
-        return {
-            "tl": QRect(r.left() - s,  r.top() - s,    s * 2, s * 2),
-            "tr": QRect(r.right() - s, r.top() - s,    s * 2, s * 2),
-            "bl": QRect(r.left() - s,  r.bottom() - s, s * 2, s * 2),
-            "br": QRect(r.right() - s, r.bottom() - s, s * 2, s * 2),
-        }
+        return {name: QRect(p.x() - s, p.y() - s, s * 2, s * 2)
+                for name, p in self.corner_points(zoom).items()}
 
-    def anchor_for(self, corner: str) -> QPointF:
-        """Image-space corner opposite to the one being dragged."""
+    def edge_at(self, sx: int, sy: int, zoom: float,
+                outside: bool = True) -> Optional[str]:
+        """Which edge ("l"/"r"/"t"/"b") a screen point is grabbing, if any.
+
+        Measured in the box's own frame, so a rotated box's edges are still
+        grabbable along their real, slanted position. The corners are left
+        to the corner handles.
+
+        `outside` is off under the Draw tool: there the band must stay inside
+        the box, or starting a new box a few px below the one just drawn
+        would resize it instead of drawing.
+        """
         n = self.norm()
-        return {
-            "tl": QPointF(n.x + n.w, n.y + n.h),
-            "tr": QPointF(n.x,       n.y + n.h),
-            "bl": QPointF(n.x + n.w, n.y),
-            "br": QPointF(n.x,       n.y),
-        }[corner]
+        p = self.to_local(QPointF(sx / zoom, sy / zoom))
+        g = _EDGE_GRAB / zoom
+        out = g if outside else 0.0
+        if not (n.x - out <= p.x() <= n.x + n.w + out
+                and n.y - out <= p.y() <= n.y + n.h + out):
+            return None
+        x_edge, x_d = (("l", abs(p.x() - n.x))
+                       if abs(p.x() - n.x) <= abs(p.x() - (n.x + n.w))
+                       else ("r", abs(p.x() - (n.x + n.w))))
+        y_edge, y_d = (("t", abs(p.y() - n.y))
+                       if abs(p.y() - n.y) <= abs(p.y() - (n.y + n.h))
+                       else ("b", abs(p.y() - (n.y + n.h))))
+        if x_d <= g and y_d <= g:
+            return None          # corner territory
+        if x_d <= g:
+            return x_edge
+        if y_d <= g:
+            return y_edge
+        return None
+
+    def rotate_corner_at(self, sx: int, sy: int, zoom: float) -> Optional[str]:
+        """Corner whose rotate ring a screen point is in.
+
+        The ring is the patch of empty slide just diagonally outside a
+        corner — past the corner handle, and never over the box itself or
+        an edge's grab band, so it can't steal a move or a resize.
+        """
+        if self.contains_screen(sx, sy, zoom) or self.edge_at(sx, sy, zoom):
+            return None
+        best, best_d = None, None
+        for name, pt in self.corner_points(zoom).items():
+            d = math.hypot(sx - pt.x(), sy - pt.y())
+            if d <= _ROT_RING and (best_d is None or d < best_d):
+                best, best_d = name, d
+        return best
 
 
 # ---------------------------------------------------------- OcclusionCanvas
@@ -208,7 +408,13 @@ class OcclusionCanvas(QWidget):
         self._drag_start: Optional[QPointF] = None
         self._drag_current: Optional[QPointF] = None
         self._resizing: Optional[_Box] = None
-        self._resize_anchor: Optional[QPointF] = None
+        self._resize_anchor: Optional[QPointF] = None   # fixed point, slide coords
+        self._resize_free = "xy"        # axes this drag may change
+        self._resize_fixed = (0.0, 0.0) # signed extent of the axes it may not
+        self._resize_angle = 0.0
+        self._rotating: Optional[list] = None   # [(box, centre0, angle0), …]
+        self._rot_pivot: Optional[QPointF] = None
+        self._rot_start = 0.0
         self._moving: Optional[_Box] = None
         self._move_offset = QPointF(0, 0)
         self._press_spos: Optional[QPoint] = None
@@ -350,6 +556,18 @@ class OcclusionCanvas(QWidget):
         self.boxes_changed.emit()
         self.update()
 
+    def reset_rotation_selected(self):
+        """Straighten every selected box (rotation has no drawn handle, so
+        there has to be a way back that isn't a careful drag)."""
+        turned = [b for b in self._selected if b.angle]
+        if not turned:
+            return
+        self._push_undo()
+        for b in turned:
+            b.angle = 0.0
+        self.boxes_changed.emit()
+        self.update()
+
     def edit_note_selected(self):
         """Attach a note to the selected region (→ card's Notes field)."""
         targets = self._expand_to_groups(self._selected)
@@ -430,7 +648,7 @@ class OcclusionCanvas(QWidget):
             # fresh box id — a pasted box is a new region, not the old card
             box = _Box(d["x"] + off, d["y"] + off, d["w"], d["h"],
                        gid, guid, d.get("shape", "rect"), d.get("mode"),
-                       d.get("note", ""), None)
+                       d.get("note", ""), None, d.get("angle", 0.0))
             self._boxes.append(box)
             pasted.append(box)
 
@@ -480,7 +698,7 @@ class OcclusionCanvas(QWidget):
         if band is None:
             return
         hits = {b for b in self._boxes
-                if band.intersects(b.screen_rect(self._disp))}
+                if band.intersects(b.bounds_screen(self._disp))}
         self._selected = self._band_base_sel | hits
 
     def _edit_note(self, targets: set):
@@ -534,6 +752,17 @@ class OcclusionCanvas(QWidget):
             sel = box in self._selected
             r = box.screen_rect(self._disp)
 
+            # Everything below draws the box unrotated; the painter is
+            # turned about the box's centre instead, so labels, badges and
+            # handles all follow it for free.
+            turned = bool(box.angle)
+            if turned:
+                p.save()
+                c = box.centre()
+                p.translate(c.x() * self._disp, c.y() * self._disp)
+                p.rotate(box.angle)
+                p.translate(-c.x() * self._disp, -c.y() * self._disp)
+
             if box.group is not None:
                 fill = _group_color(box.group, sel, alpha=160)
                 border = _group_color(box.group, sel, alpha=230)
@@ -577,9 +806,12 @@ class OcclusionCanvas(QWidget):
                 hfill = QColor(border)
                 hfill.setAlpha(255)
                 p.setPen(QPen(_HANDLE_OUTLINE, 1))
-                for h in box.corner_handles(self._disp).values():
+                for h in _local_handles(r):
                     p.fillRect(h, hfill)
                     p.drawRect(h)
+
+            if turned:
+                p.restore()
 
         # in-progress draw
         if self._drawing and self._drag_start and self._drag_current:
@@ -639,6 +871,91 @@ class OcclusionCanvas(QWidget):
                     return box, corner
         return None, None
 
+    def _edge_at(self, spos: QPoint):
+        """Return (box, edge) if spos is on an edge of a selected box."""
+        outside = self._tool == "select"
+        for box in reversed(self._boxes):
+            if box not in self._selected:
+                continue
+            edge = box.edge_at(spos.x(), spos.y(), self._disp, outside)
+            if edge:
+                return box, edge
+        return None, None
+
+    def _rotate_at(self, spos: QPoint):
+        """Return (box, corner) if spos is in a selected box's rotate ring.
+
+        Select tool only. The ring sits on empty slide just outside a corner,
+        which under the Draw tool is where you press to start the next box —
+        drawing has to win there.
+        """
+        if self._tool != "select":
+            return None, None
+        for box in reversed(self._boxes):
+            if box not in self._selected:
+                continue
+            corner = box.rotate_corner_at(spos.x(), spos.y(), self._disp)
+            if corner:
+                return box, corner
+        return None, None
+
+    def _begin_resize(self, box: _Box, handle: str):
+        """Start a corner (two-axis) or edge (one-axis) resize.
+
+        The corner opposite the handle is pinned in slide coordinates and the
+        drag is measured in the box's own frame, so the maths is identical
+        whether the box is rotated or not — and an edge drag is just a corner
+        drag with one axis held at its current extent.
+        """
+        anchor_name, free = _RESIZE_HANDLES[handle]
+        n = box.norm()
+        sx = 1.0 if anchor_name in ("tl", "bl") else -1.0
+        sy = 1.0 if anchor_name in ("tl", "tr") else -1.0
+        self._pre_drag = self.get_boxes()
+        self._resizing = box
+        self._resize_free = free
+        self._resize_angle = box.angle
+        self._resize_anchor = box.to_world(box.local_corner(anchor_name))
+        self._resize_fixed = (sx * n.w, sy * n.h)
+
+    def _begin_rotate(self, box: _Box, ipos: QPointF):
+        """Start a rotation drag around the selection's centre."""
+        targets = (set(self._selected)
+                   if box in self._selected and len(self._selected) > 1
+                   else {box})
+        xs: list[float] = []
+        ys: list[float] = []
+        for b in targets:
+            n = b.norm()            # settle any inverted rect before turning it
+            b.x, b.y, b.w, b.h = n.x, n.y, n.w, n.h
+            for name in ("tl", "tr", "bl", "br"):
+                w = b.to_world(b.local_corner(name))
+                xs.append(w.x())
+                ys.append(w.y())
+        pivot = QPointF((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0)
+        self._pre_drag = self.get_boxes()
+        self._rot_pivot = pivot
+        self._rot_start = math.degrees(math.atan2(ipos.y() - pivot.y(),
+                                                  ipos.x() - pivot.x()))
+        self._rotating = [(b, b.centre(), b.angle) for b in targets]
+
+    def _apply_rotate(self, ipos: QPointF, shift: bool):
+        pivot = self._rot_pivot
+        delta = math.degrees(math.atan2(ipos.y() - pivot.y(),
+                                        ipos.x() - pivot.x())) - self._rot_start
+        if shift:
+            if len(self._rotating) == 1:
+                a0 = self._rotating[0][2]
+                delta = round((a0 + delta) / _ROT_SNAP) * _ROT_SNAP - a0
+            else:
+                delta = round(delta / _ROT_SNAP) * _ROT_SNAP
+        for box, centre0, angle0 in self._rotating:
+            box.angle = (angle0 + delta) % 360.0
+            if len(self._rotating) > 1:
+                c = pivot + _rot_vec(centre0 - pivot, delta)
+                box.x = c.x() - box.w / 2.0
+                box.y = c.y() - box.h / 2.0
+
     def mousePressEvent(self, event):
         self.setFocus()
 
@@ -658,9 +975,21 @@ class OcclusionCanvas(QWidget):
         # corner handle of a selected box?
         box, corner = self._handle_at(spos)
         if box is not None:
-            self._pre_drag = self.get_boxes()
-            self._resizing = box
-            self._resize_anchor = box.anchor_for(corner)
+            self._begin_resize(box, corner)
+            self.update()
+            return
+
+        # edge of a selected box — one-axis resize, no handle drawn for it
+        box, edge = self._edge_at(spos)
+        if box is not None:
+            self._begin_resize(box, edge)
+            self.update()
+            return
+
+        # just outside a corner — rotate
+        box, corner = self._rotate_at(spos)
+        if box is not None:
+            self._begin_rotate(box, ipos)
             self.update()
             return
 
@@ -701,13 +1030,26 @@ class OcclusionCanvas(QWidget):
     def mouseMoveEvent(self, event):
         spos = event.pos()
         ipos = self._to_img(spos)
+        shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+
+        if self._rotating:
+            self._apply_rotate(ipos, shift)
+            self.update()
+            return
 
         if self._resizing:
+            box = self._resizing
             a = self._resize_anchor
-            self._resizing.x = a.x()
-            self._resizing.y = a.y()
-            self._resizing.w = ipos.x() - a.x()
-            self._resizing.h = ipos.y() - a.y()
+            v = _rot_vec(ipos - a, -self._resize_angle)
+            fx, fy = self._resize_fixed
+            vx = v.x() if "x" in self._resize_free else fx
+            vy = v.y() if "y" in self._resize_free else fy
+            # put the new centre where it has to be for the anchor to hold
+            c = a + _rot_vec(QPointF(vx / 2.0, vy / 2.0), self._resize_angle)
+            box.x = c.x() - vx / 2.0
+            box.y = c.y() - vy / 2.0
+            box.w = vx
+            box.h = vy
             self.update()
             return
 
@@ -747,12 +1089,19 @@ class OcclusionCanvas(QWidget):
             self.update()
             return
 
-        # cursor hints
+        # cursor hints — edge resize and rotation are hover-only, so the
+        # cursor is the only thing that announces them
         box, corner = self._handle_at(spos)
         if box is not None:
-            self.setCursor(QCursor(
-                Qt.CursorShape.SizeFDiagCursor if corner in ("tl", "br")
-                else Qt.CursorShape.SizeBDiagCursor))
+            self.setCursor(_dir_cursor(_HANDLE_DIR[corner] + box.angle))
+            return
+        box, edge = self._edge_at(spos)
+        if box is not None:
+            self.setCursor(_dir_cursor(_HANDLE_DIR[edge] + box.angle))
+            return
+        box, corner = self._rotate_at(spos)
+        if box is not None:
+            self.setCursor(_rotate_cursor())
             return
         for box in reversed(self._boxes):
             if box.contains_screen(spos.x(), spos.y(), self._disp):
@@ -774,6 +1123,14 @@ class OcclusionCanvas(QWidget):
 
     def mouseReleaseEvent(self, event):
         if event.button() != Qt.MouseButton.LeftButton:
+            return
+
+        if self._rotating:
+            self._rotating = None
+            self._rot_pivot = None
+            self._commit_drag()
+            self.boxes_changed.emit()
+            self.update()
             return
 
         if self._resizing:
@@ -980,6 +1337,11 @@ class OcclusionCanvas(QWidget):
                 act.triggered.connect(
                     lambda _, m=value: self.set_mode_selected(m))
                 mode_menu.addAction(act)
+
+            if any(b.angle for b in self._selected):
+                straighten = QAction("Reset Rotation", menu)
+                straighten.triggered.connect(self.reset_rotation_selected)
+                menu.addAction(straighten)
 
             menu.addSeparator()
 
