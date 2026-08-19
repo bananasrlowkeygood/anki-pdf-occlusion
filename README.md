@@ -10,20 +10,18 @@
 - **Grouping, notes, marquee selection, pinch-to-zoom**
 - **Sessions** — your work saves automatically per PDF; reopen it later and *Create All Cards* **updates the existing cards in place** (review history intact) instead of duplicating them
 - **Occlusion mode per PDF, per slide, or per box** — mix *Hide All, Show One* and *Hide One, Show One* freely
-- **Cloze composer** (`Ctrl+Shift+V`) — for slides that are too text-heavy to occlude, write a normal cloze card beside the slide with the slide kept underneath as the extra; the cards stack up on the left, editable, and are created by *Create All Cards* along with everything else
 
 ## Table of Contents
 
 - [1. Installation](#installation)
 - [2. Quick Start](#quick-start)
 - [3. Editing Tools](#editing-tools)
-- [4. Cloze Cards from Slides](#cloze-cards-from-slides)
-- [5. Sessions & Editing After Creation](#sessions--editing-after-creation)
-- [6. Occlusion Modes](#occlusion-modes)
-- [7. Keyboard Shortcuts](#keyboard-shortcuts)
-- [8. Configuration](#configuration)
-- [9. Contact](#contact)
-- [10. License](#license)
+- [4. Sessions & Editing After Creation](#sessions--editing-after-creation)
+- [5. Occlusion Modes](#occlusion-modes)
+- [6. Keyboard Shortcuts](#keyboard-shortcuts)
+- [7. Configuration](#configuration)
+- [8. Contact](#contact)
+- [9. License](#license)
 
 ## Installation
 
@@ -54,8 +52,7 @@
 - **Select** (`V`) — drag on empty space to marquee-select boxes; `Shift` adds to the selection
 - **Detect Text** — auto-places boxes over each text line on the slide (`T`); detected boxes come in selected, so `Del` discards them if the result isn't useful
 - **Move** — drag a box (a multi-selection moves together); `Shift`-drag a grouped box to move its whole group
-- **Resize** — drag any corner handle of a selected box, or drag an **edge** to resize in one direction only. Edges have no drawn handle: hover one and the cursor changes to show it's live.
-- **Rotate** — with the **Select** tool, hover just outside a corner of a selected box until the cursor turns into a curved arrow, then drag. Hold `Shift` to snap to 15°, and rotate a multi-selection to turn every box together around the middle of the selection. `Reset Rotation` in the right-click menu straightens them again. (Rotation is Select-only on purpose: under Draw, the space just outside a corner is where you press to start the next box.)
+- **Resize** — drag any corner handle of a selected box
 - **Zoom** — pinch on the trackpad or `Ctrl`+scroll, anchored at the pointer; `Ctrl+0` fits the slide
 - **Nudge** — arrow keys move selected boxes 1 px; `Shift` + arrows = 10 px
 - **Copy / paste** — `Ctrl+C` / `Ctrl+V`; the clipboard survives slide changes, so a repeating layout can be stamped onto every slide of a deck
@@ -64,31 +61,11 @@
 - **Notes** — double-click a box (or press `N`) to attach a note; it fills the card's Notes field
 - Grouping, mode overrides, and everything above are also in the right-click menu
 
-## Cloze Cards from Slides
-
-Some slides are all prose — a wall of text where occlusion boxes would just be rectangles over sentences. Press `Ctrl+Shift+V` (or click `Cloze`) and a composer opens **to the right of the slide**, inside the window rather than floating over it:
-
-1. Type or paste the fact, select the part to test, and press `Ctrl+Shift+C` to wrap it in `{{c1::…}}`. `Ctrl+Alt+Shift+C` reuses the current number instead of taking a new one.
-2. **Add slide as extra** is on by default — the slide you're looking at is filed under the answer, captioned with the lecture and slide number.
-3. `Ctrl+Return` files the card. It flies across to the **left of the slide** and stays there, truncated, with a count of how many cards it will make — one per `c` number. `Ctrl+Shift+V` again closes the composer and gives the room back to the slide.
-
-**Nothing is written to your collection until you press `Create All Cards`**, exactly like the boxes. Until then a cloze card is just a record you can rewrite or throw away, and the card counter at the bottom right counts it alongside the occlusion cards (`12 cards · 3 cloze`).
-
-On the cards to the left:
-
-- **Click** one to load it back into the composer and rewrite it — saving updates that same note, so review history survives.
-- **Right-click** for `Edit`, `Copy Text` and `Delete Card`. Deleting removes the record straight away; if it had already produced a note, that note is deleted the next time you create cards (you're asked first).
-- **Hover** for the full text.
-
-They're per slide and saved with the session, so they come back when you resume the PDF — and a cloze card made this way can be reopened later from Browse with the same `Ctrl+Shift+P` button that opens an occlusion card: it reopens the PDF at that slide with the card loaded into the composer.
-
-The composer follows the slide the main window is on, so flipping slides re-aims it. Cards use your collection's ordinary **Cloze** note type — nothing add-on specific — so they keep working with or without PDF Occlusion installed, and a slide used by both kinds of card is stored once.
-
 ## Sessions & Editing After Creation
 
 Your work is saved automatically per PDF (boxes, skipped slides, mode overrides, lecture name) when the dialog closes. Reopen the same PDF — via `Open PDF` or its recent-sessions arrow — and you'll be offered to resume.
 
-Because each box remembers which card it produced, **Create All Cards is safe to run again**: existing cards are *updated in place* (masks, header — with scheduling and review history untouched), new boxes become new cards, and if you deleted boxes you'll be asked whether to delete their cards too. Cloze cards work the same way — rewriting one and creating again updates its note rather than adding a second.
+Because each box remembers which card it produced, **Create All Cards is safe to run again**: existing cards are *updated in place* (masks, header — with scheduling and review history untouched), new boxes become new cards, and if you deleted boxes you'll be asked whether to delete their cards too.
 
 ## Occlusion Modes
 
@@ -109,9 +86,6 @@ Boxes with an override show a small `AO` / `OA` badge in the editor.
 | `Space` | Skip / unskip current slide |
 | `D` / `V` | Draw tool / Select tool |
 | `T` | Detect text on current slide |
-| `Ctrl+Shift+V` | Show / hide the cloze composer |
-| `Ctrl+Shift+C` | Wrap the selection in a cloze (in the composer) |
-| `Ctrl+Return` | Add the cloze card (in the composer) |
 | `G` / `U` | Group / ungroup selected boxes |
 | `N` | Add / edit note on selected box(es) |
 | `Shift`+drag box | Move a grouped box's whole group |
@@ -123,8 +97,6 @@ Boxes with an override show a small `AO` / `OA` badge in the editor.
 | `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo |
 | `Ctrl+` / `Ctrl-` | Zoom in / out |
 | `Ctrl+0` | Fit slide to window |
-| Drag box edge | Resize in one direction (hover to find it) |
-| Drag outside a corner (`V`) | Rotate; `Shift` snaps to 15° |
 | `Esc` | Clear selection |
 | `Ctrl+Shift+P` | Open from card editor |
 
