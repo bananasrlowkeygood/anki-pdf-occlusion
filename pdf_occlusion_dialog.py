@@ -6,12 +6,12 @@ from aqt.theme import theme_manager
 from aqt.qt import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QToolButton, QLabel,
     QLineEdit, QComboBox, QFileDialog, QScrollArea, QShortcut, QKeySequence,
-    Qt, QImage, QProgressDialog, QMenu, QDesktopServices, QUrl,
+    Qt, QImage, QProgressDialog, QMenu, QDesktopServices, QUrl, QTimer,
 )
 from aqt.utils import askUser, showInfo, showWarning
 
 from . import session_store
-from .cloze_dialog import ClozeComposer
+from .cloze_dialog import ClozeColumn, ClozeComposer, fly_to_chip
 from .occlusion_canvas import OcclusionCanvas
 from .card_builder import ensure_note_type, create_occlusion_notes
 from .pdf_renderer import render_pdf, get_text_line_rects
@@ -116,11 +116,15 @@ class PDFOcclusionDialog(QDialog):
         self._skipped: set[int] = set()
         self._boxes: dict[int, list[dict]] = {}
         self._page_modes: dict[int, str] = {}   # global page idx -> "ao"/"oa"
-        # Cloze composer: opened on demand, kept alive so its text survives
-        # slide flips. _cloze_images caches the slide PNG each cloze card
-        # was filed with, so several cards off one slide share one file.
-        self._cloze: Optional[ClozeComposer] = None
+        # Cloze: the composer is a panel to the right of the slide, the
+        # cards it has made are chips to the left of it, per slide.
+        # _cloze_images caches the slide PNG each card was filed with, so
+        # several cards off one slide share one file.
         self._cloze_images: dict[int, str] = {}
+        self._cloze_cards: dict[int, list] = {}
+        self._cloze_added = 0
+        self._fly = None            # in-flight card animation, kept alive
+        self._fitted = False        # is the current zoom a fit? (see _refit)
 
         self._build_ui()
 
@@ -257,7 +261,7 @@ class PDFOcclusionDialog(QDialog):
         self._detect_btn.setToolTip("Auto-box the text on this slide (T)")
         self._detect_btn.clicked.connect(self._detect_text)
 
-        self._cloze_btn = QPushButton("Cloze…")
+        self._cloze_btn = QPushButton("Cloze")
         self._cloze_btn.setToolTip(
             "Make a cloze card from this slide instead of occluding it "
             "(Ctrl+Shift+V)"
@@ -291,7 +295,23 @@ class PDFOcclusionDialog(QDialog):
         self._scroll.setWidget(self._canvas)
         self._scroll.setWidgetResizable(False)
         self._scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        root.addWidget(self._scroll, stretch=1)
+
+        # Cloze lives in the window, not over it: cards already made on the
+        # left, the composer on the right, the slide keeping the middle.
+        # Both start hidden and cost nothing until used.
+        self._cloze_column = ClozeColumn()
+        self._cloze_column.setVisible(False)
+        self._cloze = ClozeComposer(self)
+        self._cloze.setVisible(False)
+        self._cloze.card_created.connect(self._on_cloze_created)
+
+        mid = QHBoxLayout()
+        mid.setContentsMargins(0, 0, 0, 0)
+        mid.setSpacing(8)
+        mid.addWidget(self._cloze_column)
+        mid.addWidget(self._scroll, stretch=1)
+        mid.addWidget(self._cloze)
+        root.addLayout(mid, stretch=1)
 
         # ── Bottom nav / create ───────────────────────────────────────────
         bot = QHBoxLayout()
@@ -597,7 +617,8 @@ class PDFOcclusionDialog(QDialog):
                     for i, doc in enumerate(self._docs)}
         resumable = {
             i: s for i, s in sessions.items()
-            if s and (s.get("boxes") or s.get("note_map") or s.get("notes_pdf"))
+            if s and (s.get("boxes") or s.get("note_map")
+                      or s.get("notes_pdf") or s.get("cloze_cards"))
         }
         if not resumable:
             return
@@ -634,6 +655,14 @@ class PDFOcclusionDialog(QDialog):
                         b["h"] = int(b["h"] * factor)
                 self._boxes[doc["start"] + local] = blist
 
+            for k, cards in (s.get("cloze_cards") or {}).items():
+                try:
+                    local = int(k)
+                except ValueError:
+                    continue
+                if cards and 0 <= local < doc["count"]:
+                    self._cloze_cards[doc["start"] + local] = list(cards)
+
             for local in s.get("skipped", []):
                 if 0 <= int(local) < doc["count"]:
                     self._skipped.add(doc["start"] + int(local))
@@ -668,7 +697,13 @@ class PDFOcclusionDialog(QDialog):
                 for i in range(start, start + count)
                 if self._boxes.get(i)
             }
-            if not boxes and not doc.get("note_map") and not doc.get("notes_pdf"):
+            cloze_cards = {
+                str(i - start): self._cloze_cards[i]
+                for i in range(start, start + count)
+                if self._cloze_cards.get(i)
+            }
+            if (not boxes and not cloze_cards and not doc.get("note_map")
+                    and not doc.get("notes_pdf")):
                 session_store.delete(doc["path"])
                 continue
             session_store.save(doc["path"], {
@@ -682,6 +717,7 @@ class PDFOcclusionDialog(QDialog):
                     if start <= i < start + count},
                 "note_map": doc.get("note_map", {}),
                 "image_map": doc.get("image_map", {}),
+                "cloze_cards": cloze_cards,
                 "render_scale": self._render_scale,
                 "page_count": count,
                 "deck": self._deck_combo.currentText().strip(),
@@ -690,8 +726,10 @@ class PDFOcclusionDialog(QDialog):
     def done(self, result: int):
         # runs on accept, reject (Esc) and window close — work is never lost
         self._persist_sessions()
-        if self._cloze is not None:
-            self._cloze.close()      # also flushes its pending mw.reset()
+        # One refresh for the whole session's cloze cards — the main window
+        # is behind a modal dialog until now anyway.
+        if self._cloze_added:
+            mw.reset()
         super().done(result)
 
     # ---------------------------------------------------------------- zoom --
@@ -706,7 +744,16 @@ class PDFOcclusionDialog(QDialog):
             except (TypeError, ValueError):
                 self._zoom_fit()
 
+    def _refit(self):
+        """Re-fit after the side panels change how much room the slide has —
+        but only if the slide was fitted to begin with; a zoom the user set
+        by hand is theirs to keep. Deferred by a tick so the new layout is
+        settled before the viewport is measured."""
+        if self._pages and self._fitted:
+            QTimer.singleShot(0, self._zoom_fit)
+
     def _set_zoom(self, z: float):
+        self._fitted = False        # _zoom_fit sets it back after this call
         self._canvas.set_zoom(z)
         self._zoom_label.setText(f"{int(self._canvas.zoom() * 100)}%")
 
@@ -752,6 +799,7 @@ class PDFOcclusionDialog(QDialog):
         vp = self._scroll.viewport()
         self._set_zoom(min((vp.width() - 6) / natural_w,
                            (vp.height() - 6) / natural_h))
+        self._fitted = True
 
     # --------------------------------------------------------------- pages --
 
@@ -775,8 +823,9 @@ class PDFOcclusionDialog(QDialog):
         self._sync_page_mode_combo()
         self._update_controls()
         self._refresh_count()
-        if self._cloze is not None and self._cloze.isVisible():
+        if self._cloze.isVisible():
             self._cloze.refresh_slide()
+        self._cloze_column.set_cards(self._cloze_cards.get(self._page_index, []))
 
     def _sync_page_mode_combo(self):
         """Show the slide's effective mode: its override, else the config default."""
@@ -913,14 +962,35 @@ class PDFOcclusionDialog(QDialog):
     # current slide comes through the three methods below.
 
     def _open_cloze(self):
+        """Ctrl+Shift+V — show or hide the composer panel."""
         if not self._pages:
             return
-        if self._cloze is None:
-            self._cloze = ClozeComposer(self)
-        self._cloze.refresh_slide()
-        self._cloze.show()
-        self._cloze.raise_()
-        self._cloze.activateWindow()
+        showing = not self._cloze.isVisible()
+        self._cloze.setVisible(showing)
+        if showing:
+            self._cloze.refresh_slide()
+            self._cloze.focus_editor()
+        else:
+            self._canvas.setFocus()
+        self._refit()
+
+    def _on_cloze_created(self, card: dict):
+        """File the new card against its slide and send it to the column."""
+        page = card.get("page", self._page_index)
+        entry = {"nid": card["nid"], "text": card["text"]}
+        self._cloze_cards.setdefault(page, []).append(entry)
+        self._cloze_added += 1
+        if page != self._page_index:
+            return
+        chip = self._cloze_column.add_card(entry)
+        self._refit()               # the column may have just appeared
+        start = self._cloze.source_rect()
+
+        def fly():
+            self._cloze_column.scroll_to_end()
+            self._fly = fly_to_chip(self, card["text"], start, chip)
+
+        QTimer.singleShot(0, fly)   # let the column lay the chip out first
 
     def cloze_deck_name(self) -> str:
         return self._deck_combo.currentText().strip()

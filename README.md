@@ -10,7 +10,7 @@
 - **Grouping, notes, marquee selection, pinch-to-zoom**
 - **Sessions** — your work saves automatically per PDF; reopen it later and *Create All Cards* **updates the existing cards in place** (review history intact) instead of duplicating them
 - **Occlusion mode per PDF, per slide, or per box** — mix *Hide All, Show One* and *Hide One, Show One* freely
-- **Cloze composer** (`Ctrl+Shift+V`) — for slides that are too text-heavy to occlude, write a normal cloze card with the slide kept underneath as the extra
+- **Cloze composer** (`Ctrl+Shift+V`) — for slides that are too text-heavy to occlude, write a normal cloze card beside the slide with the slide kept underneath as the extra; the cards you've made stack up on the left
 
 ## Table of Contents
 
@@ -66,13 +66,13 @@
 
 ## Cloze Cards from Slides
 
-Some slides are all prose — a wall of text where occlusion boxes would just be rectangles over sentences. Press `Ctrl+Shift+V` (or click `Cloze…`) and a small composer opens beside the window:
+Some slides are all prose — a wall of text where occlusion boxes would just be rectangles over sentences. Press `Ctrl+Shift+V` (or click `Cloze`) and a composer opens **to the right of the slide**, inside the window rather than floating over it:
 
 1. Type or paste the fact, select the part to test, and press `Ctrl+Shift+C` to wrap it in `{{c1::…}}`. `Ctrl+Alt+Shift+C` reuses the current number instead of taking a new one.
 2. **Add slide as extra** is on by default — the slide you're looking at is filed under the answer, captioned with the lecture and slide number. Click the thumbnail to turn it off.
-3. `Ctrl+Return` adds the card. The composer clears, stays open for the next one, and hops to the other side of the screen so it isn't sitting on the part of the slide you're about to read.
+3. `Ctrl+Return` adds the card. It flies across to the **left of the slide** and stays there, truncated, so you can see at a glance what this slide has already produced. `Ctrl+Shift+V` again closes the composer and gives the room back to the slide.
 
-The composer always follows the slide the main window is on, so flipping slides re-aims it. Cards use your collection's ordinary **Cloze** note type — nothing add-on specific — so they keep working with or without PDF Occlusion installed, and several cards made from one slide share a single copy of the image.
+The cards on the left are per slide and are saved with the session, so they come back when you resume the PDF. Hovering one shows its full text. The composer always follows the slide the main window is on, so flipping slides re-aims it. Cards use your collection's ordinary **Cloze** note type — nothing add-on specific — so they keep working with or without PDF Occlusion installed, and several cards made from one slide share a single copy of the image.
 
 ## Sessions & Editing After Creation
 
@@ -99,7 +99,9 @@ Boxes with an override show a small `AO` / `OA` badge in the editor.
 | `Space` | Skip / unskip current slide |
 | `D` / `V` | Draw tool / Select tool |
 | `T` | Detect text on current slide |
-| `Ctrl+Shift+V` | Open the cloze composer for this slide |
+| `Ctrl+Shift+V` | Show / hide the cloze composer |
+| `Ctrl+Shift+C` | Wrap the selection in a cloze (in the composer) |
+| `Ctrl+Return` | Add the cloze card (in the composer) |
 | `G` / `U` | Group / ungroup selected boxes |
 | `N` | Add / edit note on selected box(es) |
 | `Shift`+drag box | Move a grouped box's whole group |

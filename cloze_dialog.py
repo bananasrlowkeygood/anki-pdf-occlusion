@@ -1,28 +1,31 @@
 """
-Cloze composer — a small, always-available panel beside the occlusion window.
+Cloze composer — a panel docked to the right of the slide, and the column of
+cards it has already made docked to the left.
 
 Not every slide wants occlusion. Text-heavy ones are better as a cloze card
 with the slide kept underneath as the extra, and that is what this is for:
-open it with Ctrl+Shift+V, type the fact, wrap the bit to test, hit Add.
+Ctrl+Shift+V opens the panel, you type the fact, wrap the bit to test, and
+Ctrl+Return files it.
 
-Two behaviours worth knowing:
-  - The slide shown in the thumbnail is always the slide the main window is
-    on, so flipping slides there re-aims the composer without touching it.
-  - After each card the panel hops to the other side of the screen. It is a
-    floating window over your slides; parking it where it just was would put
-    it over whatever you are about to read next.
+Both halves live inside the occlusion window rather than floating over it:
+a separate window covers the very slide you are reading from, and has to be
+moved out of the way by hand every time. On creation the card flies across
+to the left column and stays there, truncated, as a record of what this
+slide has already produced — per slide, and saved with the session.
 
 Notes are plain Cloze notes (see card_builder.create_cloze_note), so they
 survive this add-on being removed.
 """
+import re
 from typing import Optional
 
 from aqt import mw
 from aqt.qt import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox,
     QPlainTextEdit, QLineEdit, QFrame, QPixmap, QPainter, QPainterPath,
     QPropertyAnimation, QEasingCurve, QPoint, QRect, QRectF, QSize, Qt,
-    QShortcut, QKeySequence, QTextCursor, QTimer, QGuiApplication,
+    QShortcut, QKeySequence, QTextCursor, QTimer, QScrollArea, QEvent,
+    QFontMetrics, QGraphicsOpacityEffect, QSizePolicy, pyqtSignal,
 )
 from aqt.utils import showWarning
 
@@ -30,49 +33,60 @@ from . import card_builder
 
 
 _PURPLE = "#836EAA"
-_THUMB_W = 148
+PANEL_W = 306          # composer, right of the slide
+COLUMN_W = 178         # made-cards column, left of the slide
+_CHIP_CHARS = 78       # how much of a card's text a chip keeps
 
 _QSS = f"""
-QDialog {{ background: palette(window); }}
-#clozeTitle {{ font-size: 15px; font-weight: bold; }}
-#clozeSlide {{ color: rgba(127,127,127,0.95); font-size: 11px; }}
-#clozeHint  {{ color: rgba(127,127,127,0.8); font-size: 11px; }}
-#clozeDeck  {{ color: rgba(127,127,127,0.95); font-size: 11px; }}
+#clozeTitle {{ font-size: 14px; font-weight: bold; }}
+#clozeSlide, #clozeHint, #clozeDeck {{
+    color: rgba(127,127,127,0.95); font-size: 11px;
+}}
 #clozeStatus {{ font-size: 11px; font-weight: bold; }}
 QPlainTextEdit {{
     border: 1px solid rgba(127,127,127,0.30);
-    border-radius: 8px; padding: 9px; font-size: 14px;
-    background: rgba(127,127,127,0.05);
+    border-radius: 8px; padding: 8px; font-size: 13px;
+    background: rgba(127,127,127,0.06);
 }}
 QPlainTextEdit:focus {{ border: 1px solid {_PURPLE}; }}
 QLineEdit {{
     border: 1px solid rgba(127,127,127,0.30);
-    border-radius: 8px; padding: 6px 9px;
-    background: transparent;
+    border-radius: 8px; padding: 5px 8px; background: transparent;
 }}
 QLineEdit:focus {{ border: 1px solid {_PURPLE}; }}
 #slideCard {{
-    border: 1px solid rgba(127,127,127,0.25);
-    border-radius: 10px;
+    border: 1px solid rgba(127,127,127,0.25); border-radius: 10px;
 }}
 #slideCard:hover {{ border-color: {_PURPLE}; }}
 QCheckBox {{ font-size: 12px; }}
 QPushButton#clozeAdd {{
     background: {_PURPLE}; color: white; font-weight: bold;
-    padding: 7px 20px; border-radius: 7px; border: none;
+    padding: 6px 16px; border-radius: 7px; border: none;
 }}
 QPushButton#clozeAdd:hover {{ background: #75619b; }}
 QPushButton#clozeAdd:pressed {{ background: #67548c; }}
-QPushButton#clozeChip {{
-    padding: 3px 10px; border-radius: 6px; font-size: 11px;
-    border: 1px solid rgba(127,127,127,0.35); background: transparent;
+"""
+
+_CHIP_QSS = f"""
+QFrame#clozeCard {{
+    background: rgba(131,110,170,0.11);
+    border: 1px solid rgba(127,127,127,0.20);
+    border-left: 3px solid {_PURPLE};
+    border-radius: 7px;
 }}
-QPushButton#clozeChip:hover {{ background: rgba(131,110,170,0.16); }}
+QLabel {{ font-size: 11px; }}
 """
 
 
 def _native(keys: str) -> str:
     return QKeySequence(keys).toString(QKeySequence.SequenceFormat.NativeText)
+
+
+def _plain(text: str) -> str:
+    """A cloze's text as it reads, for the chip: markers out, spacing tidied."""
+    out = re.sub(r"\{\{c\d+::(.*?)(?:::[^}]*)?\}\}", r"\1", text or "",
+                 flags=re.DOTALL)
+    return re.sub(r"\s+", " ", out).strip()
 
 
 def _rounded(pm: QPixmap, radius: int = 6) -> QPixmap:
@@ -89,29 +103,120 @@ def _rounded(pm: QPixmap, radius: int = 6) -> QPixmap:
     return out
 
 
-class ClozeComposer(QDialog):
-    """Non-modal panel; `owner` is the PDFOcclusionDialog it reads slides from."""
+# ------------------------------------------------------------------- column
+
+class ClozeChip(QFrame):
+    """One made card, truncated. The full text is on the tooltip."""
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("clozeCard")
+        self.setStyleSheet(_CHIP_QSS)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 6, 8, 6)
+        full = _plain(text)
+        short = full if len(full) <= _CHIP_CHARS else full[:_CHIP_CHARS - 1] + "…"
+        label = QLabel(short)
+        label.setWordWrap(True)
+        # A wrapped QLabel only knows its height once it knows its width, and
+        # a QVBoxLayout asked to size one ends up handing out the leftover
+        # space between the chips instead of below them. The column is a
+        # fixed width, so settle both here and let the chip be Fixed-height:
+        # then the layout has nothing to guess at and the stretch gets it all.
+        inner = COLUMN_W - 22
+        label.setFixedWidth(inner)
+        label.setFixedHeight(label.heightForWidth(inner))
+        lay.addWidget(label)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred,
+                           QSizePolicy.Policy.Fixed)
+        self.setToolTip(full)
+
+
+class ClozeColumn(QWidget):
+    """The cards made from the slide on screen, newest last."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedWidth(COLUMN_W)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(6)
+
+        self._count = QLabel("")
+        self._count.setObjectName("clozeHint")
+        self._count.setStyleSheet("color:rgba(127,127,127,0.95);font-size:11px;")
+        outer.addWidget(self._count)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        inner = QWidget()
+        self._list = QVBoxLayout(inner)
+        self._list.setContentsMargins(0, 0, 0, 0)
+        self._list.setSpacing(6)
+        self._list.addStretch()
+        self._scroll.setWidget(inner)
+        outer.addWidget(self._scroll, stretch=1)
+
+    def set_cards(self, cards: list):
+        """Show the cards for one slide (replacing whatever was shown)."""
+        while self._list.count() > 1:
+            item = self._list.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                # unparent now rather than only scheduling the delete: this
+                # runs inside a modal dialog's event loop, where a widget
+                # waiting on deleteLater would keep painting over the column
+                w.setParent(None)
+                w.deleteLater()
+        for card in cards:
+            self._list.insertWidget(self._list.count() - 1,
+                                    ClozeChip(card["text"]))
+        n = len(cards)
+        self._count.setText(f"{n} cloze card{'s' if n != 1 else ''}")
+        self.setVisible(n > 0)
+
+    def add_card(self, card: dict) -> ClozeChip:
+        """Append one card and hand back its chip (hidden, for the fly-in)."""
+        chip = ClozeChip(card["text"])
+        effect = QGraphicsOpacityEffect(chip)
+        effect.setOpacity(0.0)
+        chip.setGraphicsEffect(effect)
+        self._list.insertWidget(self._list.count() - 1, chip)
+        n = self._list.count() - 1
+        self._count.setText(f"{n} cloze card{'s' if n != 1 else ''}")
+        self.setVisible(True)
+        return chip
+
+    def scroll_to_end(self):
+        bar = self._scroll.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+
+# ----------------------------------------------------------------- composer
+
+class ClozeComposer(QWidget):
+    """Right-hand panel; `owner` is the PDFOcclusionDialog it reads slides from."""
+
+    card_created = pyqtSignal(dict)
 
     def __init__(self, owner):
         super().__init__(owner)
         self._owner = owner
         self._added = 0
-        self._anim: Optional[QPropertyAnimation] = None
-        self.setWindowTitle("Cloze")
-        self.setWindowFlag(Qt.WindowType.Tool, True)
-        self.setModal(False)
+        self.setFixedWidth(PANEL_W)
         self.setStyleSheet(_QSS)
-        self.setMinimumWidth(430)
-
         self._build_ui()
-        self._place_initial()
 
     # ------------------------------------------------------------------ ui
 
     def _build_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 16, 18, 16)
-        root.setSpacing(10)
+        root.setContentsMargins(12, 0, 0, 0)
+        root.setSpacing(8)
 
         head = QHBoxLayout()
         title = QLabel("Cloze")
@@ -124,86 +229,79 @@ class ClozeComposer(QDialog):
         root.addLayout(head)
 
         self._text = QPlainTextEdit()
-        self._text.setPlaceholderText(
-            "The {{c1::hippocampus}} is required for forming new memories."
-        )
-        self._text.setMinimumHeight(132)
-        root.addWidget(self._text)
+        self._text.setMinimumHeight(120)
+        root.addWidget(self._text, stretch=1)
 
-        tools = QHBoxLayout()
-        tools.setSpacing(6)
-        chip = QPushButton("Cloze")
-        chip.setObjectName("clozeChip")
-        chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        chip.setToolTip("Wrap the selection in a new cloze deletion")
-        chip.clicked.connect(lambda: self._wrap_cloze(same=False))
-        same = QPushButton("Same #")
-        same.setObjectName("clozeChip")
-        same.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        same.setToolTip("Wrap the selection in the cloze number already used")
-        same.clicked.connect(lambda: self._wrap_cloze(same=True))
-        hint = QLabel(f"{_native('Ctrl+Shift+C')} · select text, then wrap")
+        hint = QLabel(f"{_native('Ctrl+Shift+C')} wraps the selection")
         hint.setObjectName("clozeHint")
-        tools.addWidget(chip)
-        tools.addWidget(same)
-        tools.addSpacing(6)
-        tools.addWidget(hint)
-        tools.addStretch()
-        root.addLayout(tools)
+        hint.setToolTip(
+            f"{_native('Ctrl+Shift+C')} wraps the selection in a new cloze\n"
+            f"{_native('Ctrl+Alt+Shift+C')} reuses the number already used")
+        root.addWidget(hint)
 
         self._extra = QLineEdit()
-        self._extra.setPlaceholderText("Extra (optional) — shown under the answer")
+        self._extra.setPlaceholderText("Extra")
+        self._extra.installEventFilter(self)   # Return adds, never "Create All"
         root.addWidget(self._extra)
 
         # ── the slide, as the card's extra ────────────────────────────────
         card = QFrame()
         card.setObjectName("slideCard")
         card.setCursor(Qt.CursorShape.PointingHandCursor)
-        cl = QHBoxLayout(card)
-        cl.setContentsMargins(10, 10, 10, 10)
-        cl.setSpacing(12)
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(10, 10, 10, 8)
+        cl.setSpacing(7)
         self._thumb = QLabel()
-        self._thumb.setFixedWidth(_THUMB_W)
         self._thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._slide_check = QCheckBox("Add slide as extra")
         self._slide_check.setChecked(True)
         self._slide_check.toggled.connect(self._sync_thumb_state)
         self._caption = QLabel("")
         self._caption.setObjectName("clozeHint")
-        self._caption.setWordWrap(True)
-        right = QVBoxLayout()
-        right.setSpacing(2)
-        right.addStretch()
-        right.addWidget(self._slide_check)
-        right.addWidget(self._caption)
-        right.addStretch()
+        self._caption.setStyleSheet("color:rgba(127,127,127,0.95);font-size:11px;")
         cl.addWidget(self._thumb)
-        cl.addLayout(right, stretch=1)
+        cl.addWidget(self._slide_check)
+        cl.addWidget(self._caption)
         # the whole card is the hit target, not just the checkbox
         card.mousePressEvent = lambda _e: self._slide_check.toggle()
         root.addWidget(card)
 
-        foot = QHBoxLayout()
         self._deck_label = QLabel("")
         self._deck_label.setObjectName("clozeDeck")
+        root.addWidget(self._deck_label)
+
+        foot = QHBoxLayout()
         self._status = QLabel("")
         self._status.setObjectName("clozeStatus")
+        self._status.setWordWrap(True)
         self._add_btn = QPushButton(f"Add Card  {_native('Ctrl+Return')}")
         self._add_btn.setObjectName("clozeAdd")
+        self._add_btn.setAutoDefault(False)
+        self._add_btn.setDefault(False)
         self._add_btn.clicked.connect(self._add)
-        foot.addWidget(self._deck_label)
-        foot.addStretch()
-        foot.addWidget(self._status)
-        foot.addSpacing(8)
+        foot.addWidget(self._status, stretch=1)
         foot.addWidget(self._add_btn)
         root.addLayout(foot)
 
-        QShortcut(QKeySequence("Ctrl+Return"), self, self._add)
-        QShortcut(QKeySequence("Ctrl+Enter"), self, self._add)
-        QShortcut(QKeySequence("Ctrl+Shift+C"), self,
-                  lambda: self._wrap_cloze(same=False))
-        QShortcut(QKeySequence("Ctrl+Alt+Shift+C"), self,
-                  lambda: self._wrap_cloze(same=True))
+        # Scoped to the panel: they must not fire while the canvas has focus,
+        # and Ctrl+Return especially must never reach the dialog's default
+        # button (which is Create All Cards).
+        for keys, fn in (("Ctrl+Return", self._add),
+                         ("Ctrl+Enter", self._add),
+                         ("Ctrl+Shift+C", lambda: self._wrap_cloze(False)),
+                         ("Ctrl+Alt+Shift+C", lambda: self._wrap_cloze(True))):
+            sc = QShortcut(QKeySequence(keys), self, fn)
+            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+
+    def eventFilter(self, obj, event):
+        if (obj is self._extra and event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)):
+            self._add()
+            return True
+        return super().eventFilter(obj, event)
+
+    def focus_editor(self):
+        self._text.setFocus()
 
     # -------------------------------------------------------------- slide
 
@@ -215,16 +313,20 @@ class ClozeComposer(QDialog):
             self._thumb.clear()
             self._caption.setText("")
             return
-        img, caption, label = info["image"], info["caption"], info["label"]
-        self._slide_label.setText(label)
-        self._caption.setText(caption)
-        pm = QPixmap.fromImage(img).scaled(
-            QSize(_THUMB_W, _THUMB_W), Qt.AspectRatioMode.KeepAspectRatio,
+        self._slide_label.setText(info["label"])
+        self._caption.setText(info["caption"])
+        width = PANEL_W - 46
+        pm = QPixmap.fromImage(info["image"]).scaled(
+            QSize(width, width), Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation)
         self._thumb.setPixmap(_rounded(pm))
         self._sync_thumb_state()
+
         deck = self._owner.cloze_deck_name() or "Current deck"
-        self._deck_label.setText(f"→ {deck}")
+        self._deck_label.setToolTip(deck)
+        self._deck_label.setText("→ " + QFontMetrics(self._deck_label.font())
+                                 .elidedText(deck, Qt.TextElideMode.ElideLeft,
+                                             PANEL_W - 40))
 
     def _sync_thumb_state(self):
         # unchecked reads as "this slide is not coming along" — dim it
@@ -302,52 +404,50 @@ class ClozeComposer(QDialog):
         self._extra.clear()
         self._text.setFocus()
         self._say(f"Added · {self._added} this session")
-        self._hop()
+        self.card_created.emit({
+            "nid": int(result["note_id"]),
+            "text": text,
+            "page": info["page"] if info else -1,
+        })
 
-    # --------------------------------------------------------- placement
+    # ------------------------------------------------------------ fly-in
 
-    def _screen_area(self) -> QRect:
-        screen = self.screen() or QGuiApplication.primaryScreen()
-        return screen.availableGeometry()
+    def source_rect(self) -> QRect:
+        """Where a new card should appear to come from — the editor itself."""
+        return QRect(self._text.mapTo(self.window(), QPoint(0, 0)),
+                     self._text.size())
 
-    def _place_initial(self):
-        """Open on the emptier side of the screen: whichever half the main
-        window is not sitting in."""
-        area = self._screen_area()
-        self.adjustSize()
-        g = self.frameGeometry()
-        owner_c = self._owner.frameGeometry().center()
-        margin = 28
-        x = (area.left() + margin
-             if owner_c.x() > area.center().x()
-             else area.right() - g.width() - margin)
-        y = area.center().y() - g.height() // 2
-        self.move(int(x), int(max(area.top() + margin, y)))
 
-    def _hop(self):
-        """Move to the other side of the screen after a card is filed."""
-        area = self._screen_area()
-        g = self.frameGeometry()
-        margin = 28
-        on_left = g.center().x() < area.center().x()
-        x = (area.right() - g.width() - margin) if on_left else area.left() + margin
-        y = min(max(g.y(), area.top() + margin),
-                area.bottom() - g.height() - margin)
-        target = QPoint(int(x), int(y))
+def fly_to_chip(host: QWidget, text: str, start: QRect, chip: ClozeChip):
+    """Send a copy of the new card from the composer across to its chip.
 
-        self._anim = QPropertyAnimation(self, b"pos", self)
-        self._anim.setDuration(260)
-        self._anim.setStartValue(self.pos())
-        self._anim.setEndValue(target)
-        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._anim.start()
+    The real chip is already in the column at zero opacity holding its place
+    in the layout; a throwaway copy does the travelling and hands over on
+    landing. Returns the animation — the caller has to keep a reference to
+    it or Qt collects it mid-flight.
+    """
+    end = QRect(chip.mapTo(host, QPoint(0, 0)), chip.size())
+    ghost = ClozeChip(text, host)
+    ghost.setGeometry(start)
+    ghost.show()
+    ghost.raise_()
 
-    # ------------------------------------------------------------- window
+    anim = QPropertyAnimation(ghost, b"geometry", host)
+    anim.setDuration(320)
+    anim.setStartValue(start)
+    anim.setEndValue(end)
+    anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
 
-    def closeEvent(self, event):
-        # One refresh for the whole burst — resetting the main window after
-        # every card would fight for focus mid-typing.
-        if self._added:
-            mw.reset()
-            self._added = 0
-        super().closeEvent(event)
+    def landed():
+        # unparent before scheduling the delete — inside a modal dialog a
+        # widget still waiting on deleteLater keeps painting where it landed
+        ghost.setParent(None)
+        ghost.deleteLater()
+        # drop the effect rather than just turning it up: a widget wearing a
+        # QGraphicsEffect is painted through it, which offsets it under
+        # QWidget.render(), and it has nothing left to do once it has landed
+        chip.setGraphicsEffect(None)
+
+    anim.finished.connect(landed)
+    anim.start()
+    return anim
