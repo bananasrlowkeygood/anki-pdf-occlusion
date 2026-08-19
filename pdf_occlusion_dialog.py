@@ -11,6 +11,7 @@ from aqt.qt import (
 from aqt.utils import askUser, showInfo, showWarning
 
 from . import session_store
+from .cloze_dialog import ClozeComposer
 from .occlusion_canvas import OcclusionCanvas
 from .card_builder import ensure_note_type, create_occlusion_notes
 from .pdf_renderer import render_pdf, get_text_line_rects
@@ -115,6 +116,11 @@ class PDFOcclusionDialog(QDialog):
         self._skipped: set[int] = set()
         self._boxes: dict[int, list[dict]] = {}
         self._page_modes: dict[int, str] = {}   # global page idx -> "ao"/"oa"
+        # Cloze composer: opened on demand, kept alive so its text survives
+        # slide flips. _cloze_images caches the slide PNG each cloze card
+        # was filed with, so several cards off one slide share one file.
+        self._cloze: Optional[ClozeComposer] = None
+        self._cloze_images: dict[int, str] = {}
 
         self._build_ui()
 
@@ -251,6 +257,13 @@ class PDFOcclusionDialog(QDialog):
         self._detect_btn.setToolTip("Auto-box the text on this slide (T)")
         self._detect_btn.clicked.connect(self._detect_text)
 
+        self._cloze_btn = QPushButton("Cloze…")
+        self._cloze_btn.setToolTip(
+            "Make a cloze card from this slide instead of occluding it "
+            "(Ctrl+Shift+V)"
+        )
+        self._cloze_btn.clicked.connect(self._open_cloze)
+
         slide_mode_label = QLabel("This slide:")
         slide_mode_label.setStyleSheet("color:rgba(127,127,127,0.9);")
         self._page_mode_combo = QComboBox()
@@ -263,6 +276,7 @@ class PDFOcclusionDialog(QDialog):
         row3.addWidget(self._select_btn)
         row3.addSpacing(10)
         row3.addWidget(self._detect_btn)
+        row3.addWidget(self._cloze_btn)
         row3.addStretch()
         row3.addWidget(slide_mode_label)
         row3.addWidget(self._page_mode_combo)
@@ -326,6 +340,7 @@ class PDFOcclusionDialog(QDialog):
         # first three because you type into them, the last two because they
         # have no shortcut and would otherwise be mouse-only.
         for w in (self._draw_btn, self._select_btn, self._detect_btn,
+                  self._cloze_btn,
                   self._zoom_out_btn, self._zoom_in_btn, self._fit_btn,
                   self._prev_btn, self._skip_btn, self._next_btn):
             w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -353,6 +368,9 @@ class PDFOcclusionDialog(QDialog):
         QShortcut(QKeySequence("D"), self, lambda: self._set_tool("draw"))
         QShortcut(QKeySequence("V"), self, lambda: self._set_tool("select"))
         QShortcut(QKeySequence("T"), self, self._detect_text)
+        # V for Vasu, who asked for the cloze composer. Plain V is already
+        # the Select tool, so it takes the modifiers.
+        QShortcut(QKeySequence("Ctrl+Shift+V"), self, self._open_cloze)
         QShortcut(QKeySequence("Ctrl+="), self, self._zoom_in)
         QShortcut(QKeySequence("Ctrl++"), self, self._zoom_in)
         QShortcut(QKeySequence("Ctrl+-"), self, self._zoom_out)
@@ -672,6 +690,8 @@ class PDFOcclusionDialog(QDialog):
     def done(self, result: int):
         # runs on accept, reject (Esc) and window close — work is never lost
         self._persist_sessions()
+        if self._cloze is not None:
+            self._cloze.close()      # also flushes its pending mw.reset()
         super().done(result)
 
     # ---------------------------------------------------------------- zoom --
@@ -755,6 +775,8 @@ class PDFOcclusionDialog(QDialog):
         self._sync_page_mode_combo()
         self._update_controls()
         self._refresh_count()
+        if self._cloze is not None and self._cloze.isVisible():
+            self._cloze.refresh_slide()
 
     def _sync_page_mode_combo(self):
         """Show the slide's effective mode: its override, else the config default."""
@@ -863,6 +885,7 @@ class PDFOcclusionDialog(QDialog):
         self._zoom_out_btn.setEnabled(has)
         self._fit_btn.setEnabled(has)
         self._detect_btn.setEnabled(has)
+        self._cloze_btn.setEnabled(has)
         self._page_mode_combo.setEnabled(has)
         self._sync_notes_pdf_btn()
 
@@ -881,6 +904,48 @@ class PDFOcclusionDialog(QDialog):
             )
         else:
             self._page_label.setText("No PDF loaded")
+
+    # -------------------------------------------------------------- cloze --
+    #
+    # Slides that are too text-heavy to occlude usefully are better as cloze
+    # cards with the slide kept as the extra. The composer is a separate
+    # non-modal panel (cloze_dialog.py); everything it needs about the
+    # current slide comes through the three methods below.
+
+    def _open_cloze(self):
+        if not self._pages:
+            return
+        if self._cloze is None:
+            self._cloze = ClozeComposer(self)
+        self._cloze.refresh_slide()
+        self._cloze.show()
+        self._cloze.raise_()
+        self._cloze.activateWindow()
+
+    def cloze_deck_name(self) -> str:
+        return self._deck_combo.currentText().strip()
+
+    def cloze_slide(self) -> Optional[dict]:
+        """Everything the composer needs about the slide on screen."""
+        if not self._pages:
+            return None
+        idx = self._page_index
+        doc = self._doc_for_page(idx)
+        local = idx - doc["start"] if doc else idx
+        total = doc["count"] if doc else len(self._pages)
+        lecture = (doc["lecture"] if doc else "").strip()
+        slide = f"Slide {local + 1}/{total}"
+        return {
+            "page": idx,
+            "image": self._pages[idx],
+            "label": slide,
+            "caption": f"{lecture} · {slide}" if lecture else slide,
+            "image_fname": self._cloze_images.get(idx, ""),
+        }
+
+    def remember_cloze_image(self, page_idx: int, fname: str):
+        """Reuse one slide PNG for every cloze card made from that slide."""
+        self._cloze_images[page_idx] = fname
 
     # -------------------------------------------------------- card creation --
 
