@@ -470,21 +470,6 @@ class OcclusionCanvas(QWidget):
     def get_boxes(self) -> list[dict]:
         return [b.to_dict() for b in self._boxes]
 
-    def add_boxes(self, dicts: list[dict], select: bool = True):
-        """Add boxes programmatically (e.g. text detection). One undo step."""
-        if not dicts:
-            return
-        self._push_undo()
-        added = []
-        for d in dicts:
-            box = _Box.from_dict(d)
-            self._boxes.append(box)
-            added.append(box)
-        if select:
-            self._selected = set(added)
-        self.boxes_changed.emit()
-        self.update()
-
     def set_zoom(self, zoom: float):
         self._zoom = max(0.1, min(4.0, zoom))
         self._apply_size()
@@ -541,6 +526,57 @@ class OcclusionCanvas(QWidget):
 
     def selection_count(self) -> int:
         return len(self._selected)
+
+    def selection_bounds(self) -> Optional[tuple]:
+        """The rect the selected boxes span, in image pixels, or None.
+
+        This is what scopes the detect buttons: draw a box round the one
+        table you care about, leave it selected, and detection only looks
+        inside it. Rotated boxes contribute their upright bounds — a scan
+        region only has to say roughly where to look.
+        """
+        if not self._selected:
+            return None
+        # zoom 1.0 == image pixels, which is the space boxes are stored in
+        rect = None
+        for b in self._selected:
+            r = b.bounds_screen(1.0)
+            rect = r if rect is None else rect.united(r)
+        return (rect.x(), rect.y(), rect.width(), rect.height())
+
+    def replace_boxes(self, remove_ids: set, dicts: list[dict],
+                      select: bool = False):
+        """Swap one set of boxes for another in a single undo step.
+
+        Detection uses this for both halves of its job: dropping the region
+        box it just scanned inside, and undoing itself when its button is
+        switched back off.
+
+        The selection is cleared unless asked for, and detection does not ask.
+        What is selected is what the detect buttons read as their scan region,
+        so leaving a run's own output selected would make the next detect
+        click scope itself to the boxes the last one just made — and a stray
+        G or Delete would hit all of them at once.
+        """
+        if not remove_ids and not dicts:
+            return
+        self._push_undo()
+        if remove_ids:
+            self._boxes = [b for b in self._boxes if b.id not in remove_ids]
+        added = []
+        for d in dicts:
+            box = _Box.from_dict(d)
+            self._boxes.append(box)
+            added.append(box)
+        self._selected = set(added) if (added and select) else set()
+        self.boxes_changed.emit()
+        self.update()
+
+    def box_ids(self) -> set:
+        return {b.id for b in self._boxes}
+
+    def selected_ids(self) -> set:
+        return {b.id for b in self._selected}
 
     def set_mode_selected(self, mode: Optional[str]):
         """Occlusion-mode override for the selected region(s).

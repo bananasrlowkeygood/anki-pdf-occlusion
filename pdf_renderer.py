@@ -230,3 +230,223 @@ def _tidy_page_text(raw: str) -> str:
         else:
             out.append(line)
     return "\n".join(out)
+
+
+
+
+# ------------------------------------------------------------ table detection
+#
+# Tables are found from the page's vector rules, not its text. The rules are
+# split into separate tables first (two tables side by side must not become
+# one grid with a phantom column down the gap between them), each table's
+# grid is read off its own rules, and a cell only survives if rules actually
+# bound it — which is also what lets a merged cell come out as one box
+# instead of the several it would be split into.
+
+_RULE_PT = 4.0       # a path this thin in one axis is a ruling line, not a box
+_CLUSTER_PT = 3.0    # rules within this of one another are the same gridline
+_MIN_CELL_PT = 6.0   # smaller than this and it is a border artefact, not a cell
+
+
+def get_table_cell_rects(path: str, page_index: int, scale: float) -> list:
+    """Detect ruled tables on a page and return one rect per cell.
+
+    Same (x, y, w, h) image-pixel space as get_text_line_rects, in reading
+    order. Every ruled table on the page is detected; scoping the result to
+    one of them is the caller's job. Empty list if the page has no ruled
+    table — a borderless one, or a picture of one, has no rules to read.
+    """
+    vrules, hrules, boxes, page_h = _page_rules(path, page_index)
+
+    cells: list = []
+    for vs, hs in _split_tables(vrules, hrules):
+        cells.extend(_cells_from_rules(vs, hs))
+    if not cells:
+        cells = _dedupe_cells(boxes)
+
+    out = []
+    for left, bottom, right, top in cells:
+        if right - left < _MIN_CELL_PT or top - bottom < _MIN_CELL_PT:
+            continue
+        out.append((left * scale, (page_h - top) * scale,
+                    (right - left) * scale, (top - bottom) * scale))
+    out.sort(key=lambda r: (round(r[1]), r[0]))    # down the page, then across
+    return out
+
+
+def _page_rules(path: str, page_index: int):
+    """Every path object on the page, split into v-rules, h-rules and boxes.
+
+    Rules keep their extent, not just their position: it is what says which
+    table a rule belongs to, and which cells it actually bounds.
+    """
+    pdfium = _import_pdfium()
+    import pypdfium2.raw as pdfium_c
+
+    doc = pdfium.PdfDocument(path)
+    try:
+        page = doc[page_index]
+        try:
+            _, page_h = page.get_size()
+            vrules, hrules, boxes = [], [], []
+            for obj in page.get_objects(filter=[pdfium_c.FPDF_PAGEOBJ_PATH]):
+                try:
+                    left, bottom, right, top = obj.get_bounds()
+                except Exception:
+                    continue
+                w, h = right - left, top - bottom
+                if w <= _RULE_PT and h > _RULE_PT * 2:
+                    vrules.append(((left + right) / 2.0, bottom, top))
+                elif h <= _RULE_PT and w > _RULE_PT * 2:
+                    hrules.append(((bottom + top) / 2.0, left, right))
+                elif w > _RULE_PT and h > _RULE_PT:
+                    boxes.append((left, bottom, right, top))
+                    # a stroked cell contributes its four sides too, so a
+                    # table drawn that way still forms a grid
+                    vrules.append((left, bottom, top))
+                    vrules.append((right, bottom, top))
+                    hrules.append((bottom, left, right))
+                    hrules.append((top, left, right))
+        finally:
+            page.close()
+    finally:
+        doc.close()
+    return vrules, hrules, boxes, page_h
+
+
+def _split_tables(vrules: list, hrules: list) -> list:
+    """Group rules into one bundle per table.
+
+    Two rules belong together when they cross. Crossing is transitive here —
+    a shared rule chains a whole grid into one bundle — so this is a
+    union-find over the page's rules, and each component that has enough of
+    both kinds is a table.
+    """
+    n = len(vrules)
+    parent = list(range(n + len(hrules)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        a, b = find(i), find(j)
+        if a != b:
+            parent[a] = b
+
+    tol = _CLUSTER_PT
+    for i, (x, y0, y1) in enumerate(vrules):
+        for j, (y, x0, x1) in enumerate(hrules):
+            if (x0 - tol <= x <= x1 + tol) and (y0 - tol <= y <= y1 + tol):
+                union(i, n + j)
+
+    groups: dict = {}
+    for i, r in enumerate(vrules):
+        groups.setdefault(find(i), ([], []))[0].append(r)
+    for j, r in enumerate(hrules):
+        groups.setdefault(find(n + j), ([], []))[1].append(r)
+
+    return [(vs, hs) for vs, hs in groups.values()
+            if len(vs) >= 2 and len(hs) >= 2]
+
+
+def _cluster(vals: list, tol: float) -> list:
+    """Collapse near-identical coordinates to one value each."""
+    vals = sorted(vals)
+    out, run = [], [vals[0]]
+    for v in vals[1:]:
+        if v - run[-1] <= tol:
+            run.append(v)
+        else:
+            out.append(sum(run) / len(run))
+            run = [v]
+    out.append(sum(run) / len(run))
+    return out
+
+
+def _cells_from_rules(vrules: list, hrules: list) -> list:
+    """One table's cells, merged cells included as single boxes."""
+    xs = _cluster([r[0] for r in vrules], _CLUSTER_PT)
+    ys = _cluster([r[0] for r in hrules], _CLUSTER_PT)
+    if len(xs) < 2 or len(ys) < 2:
+        return []
+
+    # where each gridline actually has ink, so a missing edge can be told
+    # from a present one
+    vspan = [_spans(vrules, x) for x in xs]
+    hspan = [_spans(hrules, y) for y in ys]
+
+    def has_v(xi, y0, y1):
+        return _covers(vspan[xi], y0, y1)
+
+    def has_h(yi, x0, x1):
+        return _covers(hspan[yi], x0, x1)
+
+    cells, taken = [], set()
+    for yi in range(len(ys) - 1):
+        for xi in range(len(xs) - 1):
+            if (xi, yi) in taken:
+                continue
+            # PDF y grows upwards, so a cell is anchored at its bottom-left
+            # and grows up/right. No left or bottom edge drawn means this is
+            # the middle of a merged cell, already swallowed by its anchor.
+            if not has_v(xi, ys[yi], ys[yi + 1]) or \
+                    not has_h(yi, xs[xi], xs[xi + 1]):
+                continue
+            xj = xi
+            while xj + 1 < len(xs) - 1 and \
+                    not has_v(xj + 1, ys[yi], ys[yi + 1]):
+                xj += 1
+            yj = yi
+            while yj + 1 < len(ys) - 1 and \
+                    not has_h(yj + 1, xs[xi], xs[xj + 1]):
+                yj += 1
+            for a in range(xi, xj + 1):
+                for b in range(yi, yj + 1):
+                    taken.add((a, b))
+            cells.append((xs[xi], ys[yi], xs[xj + 1], ys[yj + 1]))
+    return cells
+
+
+def _spans(rules: list, coord: float) -> list:
+    """The merged intervals a gridline at `coord` is actually drawn over."""
+    segs = sorted((lo, hi) for c, lo, hi in rules
+                  if abs(c - coord) <= _CLUSTER_PT)
+    if not segs:
+        return []
+    out = [list(segs[0])]
+    for lo, hi in segs[1:]:
+        if lo <= out[-1][1] + _CLUSTER_PT:
+            out[-1][1] = max(out[-1][1], hi)
+        else:
+            out.append([lo, hi])
+    return out
+
+
+def _covers(spans: list, lo: float, hi: float) -> bool:
+    """Is [lo, hi] drawn end to end? Short of that, the edge is not there."""
+    pad = min(_CLUSTER_PT, (hi - lo) * 0.25)
+    return any(a - _CLUSTER_PT <= lo + pad and b + _CLUSTER_PT >= hi - pad
+               for a, b in spans)
+
+
+def _dedupe_cells(boxes: list) -> list:
+    """Fallback for stroked rects that never formed a grid: drop any rect
+    that swallows several others, which is a frame rather than a cell."""
+    if not boxes:
+        return []
+    kept = []
+    for i, a in enumerate(boxes):
+        if sum(1 for j, b in enumerate(boxes)
+               if i != j and _contains(a, b)) < 2:
+            kept.append(a)
+    return kept or boxes
+
+
+def _contains(outer: tuple, inner: tuple, slack: float = 1.0) -> bool:
+    ol, ob, orr, ot = outer
+    il, ib, ir, it = inner
+    return (ol - slack <= il and ob - slack <= ib
+            and orr + slack >= ir and ot + slack >= it)
