@@ -1093,21 +1093,12 @@ class PDFOcclusionDialog(QDialog):
         found = len(rects)
         rects = [r for r in rects if not self._already_boxed(r)]
         if not rects:
-            if found:
-                # scanned the same place twice — say so rather than claim the
-                # region was empty, which it plainly was not
-                self._say_detect("Already boxed", transient=True)
-                return
-            showInfo(
-                "Nothing found to box in there.\n\n"
-                + ("A ruled table is boxed cell by cell and anything else "
-                   "word by word. Nothing in there was either."
-                   if ocr.available() else
-                   "A ruled table is boxed cell by cell and anything else "
-                   "word by word, but both read the PDF's own text and "
-                   "vector data — a slide that is just a picture has "
-                   "neither. Reading the pixels instead needs macOS.")
-            )
+            # Both of these go to the hint line beside the button rather than
+            # a dialog. Neither is an error and neither needs a decision, and
+            # a modal you have to dismiss to try the next region is the wrong
+            # weight for "that one came up empty".
+            self._say_detect("Already boxed" if found else "Nothing found",
+                             transient=True)
             return
 
         self._canvas.add_boxes([
