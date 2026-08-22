@@ -6,7 +6,7 @@
 
 **PDF Occlusion** is an Anki add-on that creates image occlusion cards directly from PDF lecture slides. No more importing one image at a time. Open any PDF (or several at once), draw boxes over what you want to memorize, and generate cards in bulk. Built for studying from slide-heavy lectures.
 
-- **Detect** — drag over part of a slide and it boxes it for you: a ruled table cell by cell, anything else line by line
+- **Detect** — drag over part of a slide and it boxes it for you: a ruled table cell by cell, anything else word by word — including slides that are just pictures, via macOS text recognition
 - **Grouping, notes, marquee selection, pinch-to-zoom**
 - **Sessions** — your work saves automatically per PDF; reopen it later and *Create All Cards* **updates the existing cards in place** (review history intact) instead of duplicating them
 - **Occlusion mode per PDF, per slide, or per box** — mix *Hide All, Show One* and *Hide One, Show One* freely
@@ -50,9 +50,9 @@
 - **Select** (`V`) — drag on empty space to marquee-select boxes; `Shift` adds to the selection
 - **Detect** (`T`) — click it, then **drag over the part of the slide to scan**; everything outside the region dims so it's clear what's about to be boxed. `Esc` cancels. It never runs on the whole slide: a slide usually has one table worth boxing plus a title, a footer and a page number that aren't.
   - A **ruled table** in the region is boxed **cell by cell**, read from the table's own borders in the PDF. Merged cells come out as one box.
-  - Anything else is boxed **line by line**.
+  - Anything else is boxed **word by word** — a card that hides a whole line asks you to recall a sentence, which is a harder and different question than the one the slide is teaching.
+  - If the region has no text in the PDF at all — a scanned deck, or a slide holding a screenshot of a table — it falls back to **reading the pixels**. This uses macOS's built-in text recognition, so it needs macOS; there is nothing to install and nothing extra bundled. On Windows and Linux a picture-only region simply reports that it found nothing.
   - Rescanning somewhere you've already scanned won't stack a second copy of the same boxes.
-  - Both read the PDF's text and vector data, so a slide that is just a picture has nothing to detect — draw those by hand.
 - **Move** — drag a box (a multi-selection moves together); `Shift`-drag a grouped box to move its whole group
 - **Resize** — drag any corner handle of a selected box
 - **Zoom** — pinch on the trackpad or `Ctrl`+scroll, anchored at the pointer; `Ctrl+0` fits the slide

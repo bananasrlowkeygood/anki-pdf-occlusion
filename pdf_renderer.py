@@ -100,15 +100,20 @@ def qimage_to_png_bytes(img: QImage) -> bytes:
 
 # ------------------------------------------------------------- text detection
 
-def get_text_line_rects(path: str, page_index: int, scale: float) -> list[tuple]:
-    """Detect text on a page and return merged line-level rects.
+def get_text_word_rects(path: str, page_index: int, scale: float) -> list:
+    """Detect text on a page and return one rect per word.
 
     Returns (x, y, w, h) tuples in rendered-image pixel space (i.e. already
     multiplied by `scale`, matching the QImages from render_pdf). Empty list
     if the page has no extractable text (e.g. scanned images).
+
+    A word, not a line: a card that hides a whole line of a table cell asks
+    you to recall the line, which is a different and much harder question
+    than the one the slide is actually teaching. pdfium gives a box per
+    character, so the words are the runs between the whitespace.
     """
     pdfium = _import_pdfium()
-    raw: list[list[float]] = []
+    words: list = []
     doc = pdfium.PdfDocument(path)
     try:
         page = doc[page_index]
@@ -116,75 +121,48 @@ def get_text_line_rects(path: str, page_index: int, scale: float) -> list[tuple]
             _, page_h = page.get_size()
             textpage = page.get_textpage()
             try:
-                n = textpage.count_rects(0, -1)
+                text = textpage.get_text_range()
+                n = min(textpage.count_chars(), len(text))
+                cur = None
                 for i in range(n):
-                    left, bottom, right, top = textpage.get_rect(i)
-                    # PDF coords are bottom-left origin in points; the
-                    # rendered image is top-left origin in px.
-                    x = left * scale
-                    y = (page_h - top) * scale
-                    w = (right - left) * scale
-                    h = (top - bottom) * scale
-                    if w >= 3 and h >= 3:
-                        raw.append([x, y, w, h])
+                    if text[i].isspace():
+                        if cur:
+                            words.append(cur)
+                            cur = None
+                        continue
+                    try:
+                        left, bottom, right, top = textpage.get_charbox(i)
+                    except Exception:
+                        continue
+                    if right <= left or top <= bottom:
+                        continue    # a zero-width glyph carries no box
+                    if cur is None:
+                        cur = [left, bottom, right, top]
+                    else:
+                        cur[0] = min(cur[0], left)
+                        cur[1] = min(cur[1], bottom)
+                        cur[2] = max(cur[2], right)
+                        cur[3] = max(cur[3], top)
+                if cur:
+                    words.append(cur)
             finally:
                 textpage.close()
         finally:
             page.close()
     finally:
         doc.close()
-    return _merge_text_rects(raw)
 
-
-def _merge_text_rects(rects: list[list[float]]) -> list[tuple]:
-    """Cluster raw pdfium text rects into readable line boxes.
-
-    Rects whose vertical centers align are treated as one line; within a
-    line, segments separated by less than ~1 line-height are merged (keeps
-    separate labels/columns as separate boxes). A small padding makes the
-    resulting masks cover ascenders/descenders comfortably.
-    """
-    if not rects:
-        return []
-
-    # group into lines by vertical-center proximity
-    rects = sorted(rects, key=lambda r: (r[1] + r[3] / 2, r[0]))
-    lines: list[list[list[float]]] = []
-    for r in rects:
-        cy = r[1] + r[3] / 2
-        placed = False
-        for line in lines:
-            ly = sum(s[1] + s[3] / 2 for s in line) / len(line)
-            lh = max(s[3] for s in line)
-            if abs(cy - ly) < max(lh, r[3]) * 0.5:
-                line.append(r)
-                placed = True
-                break
-        if not placed:
-            lines.append([r])
-
-    merged: list[tuple] = []
-    for line in lines:
-        line.sort(key=lambda r: r[0])
-        cur = list(line[0])
-        for seg in line[1:]:
-            gap = seg[0] - (cur[0] + cur[2])
-            if gap < max(cur[3], seg[3]) * 1.0:
-                right = max(cur[0] + cur[2], seg[0] + seg[2])
-                top = min(cur[1], seg[1])
-                bottom = max(cur[1] + cur[3], seg[1] + seg[3])
-                cur = [cur[0], top, right - cur[0], bottom - top]
-            else:
-                merged.append(tuple(cur))
-                cur = list(seg)
-        merged.append(tuple(cur))
-
-    padded = []
-    for x, y, w, h in merged:
+    out = []
+    for left, bottom, right, top in words:
+        w, h = right - left, top - bottom
+        if w < 1.0 or h < 1.0:
+            continue
+        # a little air so the mask covers ascenders and descenders
         pad = h * 0.15
-        padded.append((max(0.0, x - pad), max(0.0, y - pad),
-                       w + pad * 2, h + pad * 2))
-    return padded
+        out.append(((left - pad) * scale, (page_h - top - pad) * scale,
+                    (w + pad * 2) * scale, (h + pad * 2) * scale))
+    out.sort(key=lambda r: (round(r[1]), r[0]))
+    return out
 
 
 # ------------------------------------------------------------ text extraction

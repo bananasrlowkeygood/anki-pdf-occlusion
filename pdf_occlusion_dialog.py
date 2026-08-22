@@ -7,7 +7,7 @@ from aqt.theme import theme_manager
 from aqt.qt import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QToolButton, QLabel,
     QLineEdit, QComboBox, QFileDialog, QScrollArea, QShortcut, QKeySequence,
-    Qt, QImage, QProgressDialog, QMenu, QDesktopServices, QUrl, QTimer,
+    Qt, QRect, QImage, QProgressDialog, QMenu, QDesktopServices, QUrl, QTimer,
 )
 from aqt.utils import askUser, showInfo, showWarning
 
@@ -17,7 +17,8 @@ from .occlusion_canvas import OcclusionCanvas
 from .card_builder import (ensure_note_type, create_occlusion_notes,
                            create_cloze_notes, cloze_note_type,
                            cloze_card_count)
-from .pdf_renderer import (render_pdf, get_text_line_rects, get_page_text,
+from . import ocr
+from .pdf_renderer import (render_pdf, get_text_word_rects, get_page_text,
                            get_table_cell_rects)
 
 
@@ -640,6 +641,10 @@ class PDFOcclusionDialog(QDialog):
         self._boxes.clear()
         self._page_modes.clear()
 
+        # the first recognition on a machine loads macOS's models and takes
+        # ~30s; get that out of the way now rather than under a Detect click
+        ocr.warm_up()
+
         self._maybe_resume_sessions(silent=silent_resume)
 
         self._show_page()
@@ -958,15 +963,25 @@ class PDFOcclusionDialog(QDialog):
             rects = [r for r in get_table_cell_rects(
                 doc["path"], local, self._render_scale)
                 if _centre_inside(r, region)]
-            kind = "table"
+            kind = "cell"
             if len(rects) < 2:
-                rects = [r for r in get_text_line_rects(
+                rects = [r for r in get_text_word_rects(
                     doc["path"], local, self._render_scale)
                     if _centre_inside(r, region)]
-                kind = "text"
+                kind = "word"
         except Exception as exc:
             showWarning(f"Detection failed:\n{exc}")
             return
+
+        # Nothing in the PDF's own data? Then the slide is a picture of one,
+        # and the only way in is to read it off the pixels.
+        if not rects and ocr.available():
+            try:
+                rects = self._ocr_region(region)
+            except ocr.OcrError as exc:
+                showWarning(f"Text recognition failed:\n{exc}")
+                return
+            kind = "word"
 
         found = len(rects)
         rects = [r for r in rects if not self._already_boxed(r)]
@@ -978,10 +993,13 @@ class PDFOcclusionDialog(QDialog):
                 return
             showInfo(
                 "Nothing found to box in there.\n\n"
-                "A ruled table is boxed cell by cell and anything else line "
-                "by line, but both read the PDF's own text and vector data — "
-                "a slide that is just a picture has neither. Draw the boxes "
-                "by hand there."
+                + ("A ruled table is boxed cell by cell and anything else "
+                   "word by word. Nothing in there was either."
+                   if ocr.available() else
+                   "A ruled table is boxed cell by cell and anything else "
+                   "word by word, but both read the PDF's own text and "
+                   "vector data — a slide that is just a picture has "
+                   "neither. Reading the pixels instead needs macOS.")
             )
             return
 
@@ -990,8 +1008,22 @@ class PDFOcclusionDialog(QDialog):
              "group": None, "shape": "rect", "id": uuid.uuid4().hex}
             for rx, ry, rw, rh in rects])
         self._say_detect(
-            f"{len(rects)} {'cell' if kind == 'table' else 'line'}"
-            f"{'s' if len(rects) != 1 else ''} boxed", transient=True)
+            f"{len(rects)} {kind}{'s' if len(rects) != 1 else ''} boxed",
+            transient=True)
+
+    def _ocr_region(self, region: tuple) -> list:
+        """Read the words out of the pixels of one region of the slide.
+
+        Only the region is handed over, not the whole slide: it is less for
+        the recogniser to chew on, and it cannot drag in a heading from the
+        far side of the page that the drag deliberately left out.
+        """
+        x, y, w, h = (int(v) for v in region)
+        page = self._pages[self._page_index]
+        crop = page.copy(QRect(max(0, x), max(0, y),
+                               min(int(w), page.width()), min(int(h), page.height())))
+        return [(rx + max(0, x), ry + max(0, y), rw, rh)
+                for rx, ry, rw, rh, _text in ocr.recognize(crop)]
 
     def _already_boxed(self, rect: tuple, slack: int = 3) -> bool:
         """Is this rect already on the slide? Scanning the same region twice

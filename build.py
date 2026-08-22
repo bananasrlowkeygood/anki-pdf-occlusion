@@ -38,6 +38,7 @@ ADDON_FILES = [
     "occlusion_canvas.py",
     "card_builder.py",
     "cloze_dialog.py",
+    "ocr.py",
     "session_store.py",
     "config.json",
     "config.md",
