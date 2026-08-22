@@ -474,7 +474,7 @@ class ClozeComposer(QWidget):
             self._text.clear()
             self._extra.clear()
             self._text.setFocus()
-            self._say(f"Added · {self._added} this session")
+            self._say(f"Added ({self._added} this session)")
             self.card_created.emit(card)
 
     # ------------------------------------------------------------ fly-in

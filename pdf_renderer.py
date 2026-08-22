@@ -12,6 +12,7 @@ rendering backend directly.
 import os
 import platform
 import sys
+from typing import Optional
 
 from aqt.qt import QImage, QBuffer, QIODevice
 
@@ -100,7 +101,8 @@ def qimage_to_png_bytes(img: QImage) -> bytes:
 
 # ------------------------------------------------------------- text detection
 
-def get_text_word_rects(path: str, page_index: int, scale: float) -> list:
+def get_text_word_rects(path: str, page_index: int, scale: float,
+                        region: Optional[tuple] = None) -> list:
     """Detect text on a page and return one rect per word.
 
     Returns (x, y, w, h) tuples in rendered-image pixel space (i.e. already
@@ -114,6 +116,11 @@ def get_text_word_rects(path: str, page_index: int, scale: float) -> list:
     run of prose comes out as one box while two columns sharing a line stay
     two. Working up from words rather than down from lines is what makes
     the box hug the text instead of the line's full extent.
+
+    `region` (x, y, w, h, image px) restricts it, and does so BEFORE the
+    merge, not after. That ordering is the whole point: dragging over one
+    word of a title has to give you that word, not the run it happens to
+    belong to.
     """
     pdfium = _import_pdfium()
     words: list = []
@@ -155,57 +162,72 @@ def get_text_word_rects(path: str, page_index: int, scale: float) -> list:
     finally:
         doc.close()
 
-    out = []
-    for left, bottom, right, top in _join_words(words):
+    # to image pixels, still one rect per word
+    raw = []
+    for left, bottom, right, top in words:
         w, h = right - left, top - bottom
         if w < 1.0 or h < 1.0:
             continue
-        # a little air so the mask covers ascenders and descenders
-        pad = h * 0.15
-        out.append(((left - pad) * scale, (page_h - top - pad) * scale,
-                    (w + pad * 2) * scale, (h + pad * 2) * scale))
-    out.sort(key=lambda r: (round(r[1]), r[0]))
-    return out
+        raw.append((left * scale, (page_h - top) * scale, w * scale, h * scale))
+
+    if region is not None:
+        raw = [r for r in raw if _centre_in(r, region)]
+    return merge_word_rects(raw)
 
 
 _SPACE_GAP = 0.6    # of the line's height; wider than this is not a space
+_WORD_PAD = 0.15    # of the line's height, so masks cover ascenders/descenders
 
 
-def _join_words(words: list) -> list:
-    """Rejoin words that a reader would take as one run of text.
+def _centre_in(rect: tuple, region: tuple) -> bool:
+    x, y, w, h = rect
+    rx, ry, rw, rh = region
+    return (rx <= x + w / 2.0 <= rx + rw) and (ry <= y + h / 2.0 <= ry + rh)
+
+
+def merge_word_rects(words: list) -> list:
+    """Rejoin words a reader would take as one run, and pad the result.
 
     Words sharing a baseline and separated by no more than about a space
     become one box; anything wider — the gap between two columns, or
-    between two cells of a borderless table — stays a break.
+    between two cells of a borderless table — stays a break. Input and
+    output are (x, y, w, h) in image pixels, top-left origin.
     """
     if not words:
         return []
     lines: list = []
-    for w in sorted(words, key=lambda r: (-(r[1] + r[3]) / 2, r[0])):
-        cy = (w[1] + w[3]) / 2
+    for w in sorted(words, key=lambda r: (r[1] + r[3] / 2.0, r[0])):
+        cy = w[1] + w[3] / 2.0
         for line in lines:
-            ly = sum((s[1] + s[3]) / 2 for s in line) / len(line)
-            lh = max(s[3] - s[1] for s in line)
-            if abs(cy - ly) < max(lh, w[3] - w[1]) * 0.5:
+            ly = sum(s[1] + s[3] / 2.0 for s in line) / len(line)
+            lh = max(s[3] for s in line)
+            if abs(cy - ly) < max(lh, w[3]) * 0.5:
                 line.append(w)
                 break
         else:
             lines.append([w])
 
-    out = []
+    merged = []
     for line in lines:
         line.sort(key=lambda r: r[0])
         cur = list(line[0])
         for seg in line[1:]:
-            gap = seg[0] - cur[2]
-            if gap <= max(cur[3] - cur[1], seg[3] - seg[1]) * _SPACE_GAP:
-                cur[1] = min(cur[1], seg[1])
-                cur[2] = max(cur[2], seg[2])
-                cur[3] = max(cur[3], seg[3])
+            gap = seg[0] - (cur[0] + cur[2])
+            if gap <= max(cur[3], seg[3]) * _SPACE_GAP:
+                right = max(cur[0] + cur[2], seg[0] + seg[2])
+                top = min(cur[1], seg[1])
+                bottom = max(cur[1] + cur[3], seg[1] + seg[3])
+                cur = [cur[0], top, right - cur[0], bottom - top]
             else:
-                out.append(cur)
+                merged.append(cur)
                 cur = list(seg)
-        out.append(cur)
+        merged.append(cur)
+
+    out = []
+    for x, y, w, h in merged:
+        pad = h * _WORD_PAD
+        out.append((x - pad, y - pad, w + pad * 2, h + pad * 2))
+    out.sort(key=lambda r: (round(r[1]), r[0]))
     return out
 
 

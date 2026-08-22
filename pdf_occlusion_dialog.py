@@ -21,7 +21,7 @@ from .card_builder import (ensure_note_type, create_occlusion_notes,
                            cloze_card_count)
 from . import ocr
 from .pdf_renderer import (render_pdf, get_text_word_rects, get_page_text,
-                           get_table_cell_rects)
+                           get_table_cell_rects, merge_word_rects)
 
 
 _ZOOM_STEPS = [0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
@@ -245,7 +245,7 @@ class PDFOcclusionDialog(QDialog):
 
         self._lecture_edit = QLineEdit()
         self._lecture_edit.setPlaceholderText("Lecture")
-        self._lecture_edit.setToolTip("Card header · from the filename")
+        self._lecture_edit.setToolTip("Card header")
         self._lecture_edit.setMinimumWidth(180)
         self._lecture_edit.textEdited.connect(self._on_lecture_edited)
 
@@ -286,12 +286,12 @@ class PDFOcclusionDialog(QDialog):
 
         self._text_btn = QPushButton("Text")
         self._text_btn.setCheckable(True)
-        self._text_btn.setToolTip("Text on slide · click a box to label it (A)")
+        self._text_btn.setToolTip("Type on the slide, or on a box (T)")
         self._text_btn.clicked.connect(lambda: self._set_tool("text"))
 
         self._detect_btn = QPushButton("Detect")
         self._detect_btn.setCheckable(True)
-        self._detect_btn.setToolTip("Auto-box an area — then drag it (T)")
+        self._detect_btn.setToolTip("Box an area automatically (F)")
         self._detect_btn.clicked.connect(self._arm_detect)
 
         self._cloze_btn = QPushButton("Cloze")
@@ -434,8 +434,8 @@ class PDFOcclusionDialog(QDialog):
         QShortcut(QKeySequence(Qt.Key.Key_PageDown), self, self._next_page)
         QShortcut(QKeySequence("D"), self, lambda: self._set_tool("draw"))
         QShortcut(QKeySequence("V"), self, lambda: self._set_tool("select"))
-        QShortcut(QKeySequence("A"), self, lambda: self._set_tool("text"))
-        QShortcut(QKeySequence("T"), self, self._arm_detect)
+        QShortcut(QKeySequence("T"), self, lambda: self._set_tool("text"))
+        QShortcut(QKeySequence("F"), self, self._arm_detect)
         # V for Vasu, who asked for the cloze composer. Plain V is already
         # the Select tool, so it takes the modifiers.
         QShortcut(QKeySequence("Ctrl+Shift+V"), self, self._open_cloze)
@@ -566,7 +566,7 @@ class PDFOcclusionDialog(QDialog):
             path = s["pdf_path"]
             name = s.get("lecture") or os.path.splitext(os.path.basename(path))[0]
             n_boxes = sum(len(v) for v in s.get("boxes", {}).values())
-            label = f"{name}  ·  {n_boxes} box{'es' if n_boxes != 1 else ''}"
+            label = f"{name}  ({n_boxes} box{'es' if n_boxes != 1 else ''})"
             self._recent_menu.addAction(
                 label, lambda p=path: self._open_recent(p))
 
@@ -1032,12 +1032,12 @@ class PDFOcclusionDialog(QDialog):
             rects = [r for r in get_table_cell_rects(
                 doc["path"], local, self._render_scale)
                 if _centre_inside(r, region)]
-            kind = "cell"
             if len(rects) < 2:
-                rects = [r for r in get_text_word_rects(
-                    doc["path"], local, self._render_scale)
-                    if _centre_inside(r, region)]
-                kind = "word"
+                # the region goes in, rather than filtering afterwards: a
+                # drag over one word of a title must give that word, not the
+                # run it happens to sit in
+                rects = get_text_word_rects(
+                    doc["path"], local, self._render_scale, region=region)
         except Exception as exc:
             showWarning(f"Detection failed:\n{exc}")
             return
@@ -1050,7 +1050,6 @@ class PDFOcclusionDialog(QDialog):
             except ocr.OcrError as exc:
                 showWarning(f"Text recognition failed:\n{exc}")
                 return
-            kind = "word"
 
         found = len(rects)
         rects = [r for r in rects if not self._already_boxed(r)]
@@ -1067,9 +1066,7 @@ class PDFOcclusionDialog(QDialog):
             {"x": int(rx), "y": int(ry), "w": int(rw), "h": int(rh),
              "group": None, "shape": "rect", "id": uuid.uuid4().hex}
             for rx, ry, rw, rh in rects])
-        self._say_detect(
-            f"{len(rects)} {kind}{'s' if len(rects) != 1 else ''} boxed",
-            transient=True)
+        self._say_detect("")
 
     def _ocr_region(self, region: tuple) -> list:
         """Read the words out of the pixels of one region of the slide.
@@ -1082,8 +1079,12 @@ class PDFOcclusionDialog(QDialog):
         page = self._page_image(self._page_index)
         crop = page.copy(QRect(max(0, x), max(0, y),
                                min(int(w), page.width()), min(int(h), page.height())))
+        # merged the same way the PDF's own text is, so a phrase read off
+        # the pixels comes out as one box too
+        found = merge_word_rects([(rx, ry, rw, rh)
+                                  for rx, ry, rw, rh, _t in ocr.recognize(crop)])
         return [(rx + max(0, x), ry + max(0, y), rw, rh)
-                for rx, ry, rw, rh, _text in ocr.recognize(crop)]
+                for rx, ry, rw, rh in found]
 
     def _already_boxed(self, rect: tuple, slack: int = 3) -> bool:
         """Is this rect already on the slide? Scanning the same region twice
@@ -1131,7 +1132,7 @@ class PDFOcclusionDialog(QDialog):
         n = occlusion + cloze
         self._count_label.setText(
             f"{n} card{'s' if n != 1 else ''}"
-            + (f"  ·  {cloze} cloze" if cloze else ""))
+            + (f"  ({cloze} cloze)" if cloze else ""))
         self._count_label.setToolTip(
             f"{occlusion} occlusion card{'s' if occlusion != 1 else ''}"
             + (f"\n{cloze} cloze card{'s' if cloze != 1 else ''}" if cloze else "")
@@ -1158,7 +1159,7 @@ class PDFOcclusionDialog(QDialog):
             doc = self._doc_for_page(idx)
             prefix = ""
             if doc and len(self._docs) > 1:
-                prefix = f"{os.path.basename(doc['path'])} — "
+                prefix = f"{os.path.basename(doc['path'])}:  "
             self._page_label.setText(f"{prefix}Slide {idx + 1} / {n}")
         else:
             self._page_label.setText("No PDF loaded")

@@ -122,8 +122,8 @@ def recognize(img: QImage, timeout: float = 30.0) -> list:
             )
         except subprocess.TimeoutExpired:
             raise OcrError(
-                "Text recognition timed out. The very first run on a machine "
-                "loads macOS's models and can take half a minute — try again."
+                "Text recognition timed out. The first run on a machine "
+                "loads macOS's models and can take half a minute. Try again."
             )
         if proc.returncode != 0:
             raise OcrError((proc.stderr or "osascript failed").strip())
