@@ -48,12 +48,12 @@
 
 - **Draw** (`D`) — drag on empty space to draw a box; hold `Shift` while drawing and the new box joins the selection's group, so a multi-part card can be sketched in one pass
 - **Select** (`V`) — drag on empty space to marquee-select boxes; `Shift` adds to the selection
-- **Text** (`A`) — two things, depending on what you click:
-  - **Drag on the slide** to *write onto the slide itself*. Not a card and not a note: the text joins the picture, so it appears on every card cut from that slide and an occlusion box can hide it exactly like something the lecturer had printed there. Click text to edit it; clear the text to remove it. Saved with the session.
-  - **Click an occlusion box** to *label the mask* — a word or two shown across it in small white bold, and **only while that box is the one being asked about**. It prompts the kind of answer wanted ("enzyme", "artery") without giving it away, and it's gone the moment the mask lifts. Boxes too small to show it legibly don't get one.
+- **Text** (`A`) — everything is typed in place; there are no dialogs.
+  - **Drag on the slide** and the caret is already in the box — just type. The text joins the picture, so it appears on every card cut from that slide and an occlusion box can hide it like anything the lecturer had printed there. Drag it to move, drag a corner to resize, click to re-edit, `Del` or an empty box to remove. Saved with the session.
+  - **Click an occlusion box** to label the mask, typed in place in the size and weight the card will use. The label shows **only while that box is the one being asked about** — it prompts the kind of answer wanted ("enzyme", "artery") without giving it away, and goes when the mask lifts. Boxes too small to show one legibly don't get one.
 - **Detect** (`T`) — click it, then **drag over the part of the slide to scan**; everything outside the region dims so it's clear what's about to be boxed. `Esc` cancels. It never runs on the whole slide: a slide usually has one table worth boxing plus a title, a footer and a page number that aren't.
   - A **ruled table** in the region is boxed **cell by cell**, read from the table's own borders in the PDF. Merged cells come out as one box.
-  - Anything else is boxed **word by word** — a card that hides a whole line asks you to recall a sentence, which is a harder and different question than the one the slide is teaching.
+  - Anything else is found **word by word** and then merged back up: words a normal space apart rejoin into one box, so a phrase comes out as a single box that hugs the text, while two columns sharing a line stay two. Working up from words rather than down from lines is what keeps the box tight to the words instead of spanning the line's full extent.
   - If the region has no text in the PDF at all — a scanned deck, or a slide holding a screenshot of a table — it falls back to **reading the pixels**. This uses macOS's built-in text recognition, so it needs macOS; there is nothing to install and nothing extra bundled. On Windows and Linux a picture-only region simply reports that it found nothing.
   - Rescanning somewhere you've already scanned won't stack a second copy of the same boxes.
 - **Move** — drag a box (a multi-selection moves together); `Shift`-drag a grouped box to move its whole group

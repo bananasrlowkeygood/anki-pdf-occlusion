@@ -7,7 +7,7 @@ from aqt.theme import theme_manager
 from aqt.qt import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QToolButton, QLabel,
     QLineEdit, QComboBox, QFileDialog, QScrollArea, QShortcut, QKeySequence,
-    Qt, QRect, QImage, QPainter, QInputDialog, QProgressDialog, QMenu,
+    Qt, QRect, QImage, QPainter, QProgressDialog, QMenu,
     QDesktopServices, QUrl, QTimer,
 )
 from aqt.utils import askUser, showInfo, showWarning
@@ -245,7 +245,7 @@ class PDFOcclusionDialog(QDialog):
 
         self._lecture_edit = QLineEdit()
         self._lecture_edit.setPlaceholderText("Lecture")
-        self._lecture_edit.setToolTip("Card header text · auto-filled from the filename")
+        self._lecture_edit.setToolTip("Card header · from the filename")
         self._lecture_edit.setMinimumWidth(180)
         self._lecture_edit.textEdited.connect(self._on_lecture_edited)
 
@@ -286,30 +286,16 @@ class PDFOcclusionDialog(QDialog):
 
         self._text_btn = QPushButton("Text")
         self._text_btn.setCheckable(True)
-        self._text_btn.setToolTip(
-            "Write text onto the slide (A)\n\n"
-            "Drag out a box and type. The text becomes part of the slide, "
-            "not a card — occlude it like anything else printed there.\n"
-            "Click text to edit it; clear the text to remove it.\n\n"
-            "Click an occlusion box instead and you label the mask: a word "
-            "or two shown across it only while that box is the one being "
-            "asked about.")
+        self._text_btn.setToolTip("Text on slide · click a box to label it (A)")
         self._text_btn.clicked.connect(lambda: self._set_tool("text"))
 
         self._detect_btn = QPushButton("Detect")
         self._detect_btn.setCheckable(True)
-        self._detect_btn.setToolTip(
-            "Auto-box part of this slide (T)\n\n"
-            "Click, then drag out the part to scan. A ruled table there is "
-            "boxed cell by cell, anything else line by line.\n"
-            "Esc cancels.")
+        self._detect_btn.setToolTip("Auto-box an area — then drag it (T)")
         self._detect_btn.clicked.connect(self._arm_detect)
 
         self._cloze_btn = QPushButton("Cloze")
-        self._cloze_btn.setToolTip(
-            "Make a cloze card from this slide instead of occluding it "
-            "(Ctrl+Shift+V)"
-        )
+        self._cloze_btn.setToolTip("Cloze card from this slide (Ctrl+Shift+V)")
         self._cloze_btn.clicked.connect(self._open_cloze)
 
         slide_mode_label = QLabel("This slide:")
@@ -343,8 +329,7 @@ class PDFOcclusionDialog(QDialog):
         self._canvas.zoom_gesture.connect(self._on_zoom_gesture)
         self._canvas.scan_region.connect(self._on_scan_region)
         self._canvas.scan_cancelled.connect(self._on_scan_cancelled)
-        self._canvas.text_region.connect(self._on_text_region)
-        self._canvas.text_activated.connect(self._on_text_activated)
+        self._canvas.annotations_changed.connect(self._on_annotations_changed)
         self._canvas.label_activated.connect(self._on_label_activated)
         self._scroll = QScrollArea()
         self._scroll.setWidget(self._canvas)
@@ -551,10 +536,7 @@ class PDFOcclusionDialog(QDialog):
         path = self._notes_pdf()
         if not path:
             self._notes_pdf_btn.setText("Notes PDF")
-            self._notes_pdf_btn.setToolTip(
-                "Attach a lecture-notes PDF · the cards get a Notes button "
-                "that opens it"
-            )
+            self._notes_pdf_btn.setToolTip("Attach lecture notes PDF")
             return
         name = os.path.basename(path)
         if len(name) > 22:
@@ -967,63 +949,21 @@ class PDFOcclusionDialog(QDialog):
     # the picture, so it lands on every card cut from this slide and a box
     # can occlude it exactly like something the lecturer had printed there.
 
-    def _ask_text(self, current: str = "") -> Optional[str]:
-        text, ok = QInputDialog.getMultiLineText(
-            self, "Text on Slide",
-            "Written onto the slide itself — occlude it like anything else "
-            "printed there:",
-            current)
-        return text if ok else None
-
-    def _on_text_region(self, x: float, y: float, w: float, h: float):
-        text = self._ask_text()
-        if not text or not text.strip():
-            return
-        self._annots.setdefault(self._page_index, []).append({
-            "id": uuid.uuid4().hex, "x": int(x), "y": int(y),
-            "w": int(w), "h": int(h), "text": text.strip(),
-        })
-        self._annots_changed()
-
-    def _on_text_activated(self, annot_id: str):
-        here = self._annots.get(self._page_index, [])
-        found = next((a for a in here if a["id"] == annot_id), None)
-        if found is None:
-            return
-        text = self._ask_text(found.get("text", ""))
-        if text is None:
-            return
-        if text.strip():
-            found["text"] = text.strip()
+    def _on_annotations_changed(self):
+        """The canvas edits text in place and hands back the result — this
+        only has to remember it and drop the composited page."""
+        here = [a for a in self._canvas.annotations() if (a.get("text") or "").strip()]
+        if here:
+            self._annots[self._page_index] = here
         else:
-            # emptied — that is how you take one back off
-            here.remove(found)
-        self._annots_changed()
+            self._annots.pop(self._page_index, None)
+        self._page_cache.pop(self._page_index, None)
+        self._refresh_count()
 
     def _on_label_activated(self, box_id: str):
-        """Text tool on an occlusion box: write a label across the mask.
-
-        A word or two saying what kind of answer is wanted, shown only while
-        that box is the one being asked about — so it prompts without
-        answering. Too small a box has nowhere legible to put it, and the
-        rule for that is card_builder's, not this dialog's.
-        """
-        if not self._canvas.label_fits_box(box_id):
-            self._say_detect("Box too small for a label", transient=True)
-            return
-        text, ok = QInputDialog.getText(
-            self, "Label on Mask",
-            "Shown across this mask while it is the box being asked about:",
-            text=self._canvas.box_label(box_id))
-        if ok:
-            self._canvas.set_box_label(box_id, text.strip())
-
-    def _annots_changed(self):
-        here = self._annots.get(self._page_index, [])
-        if not here:
-            self._annots.pop(self._page_index, None)
-        self._canvas.set_annotations(here)
-        self._page_cache.pop(self._page_index, None)
+        """Only reached for a box with nowhere legible to put a label — the
+        canvas edits the rest in place."""
+        self._say_detect("Box too small for a label", transient=True)
 
     def _page_image(self, idx: int) -> QImage:
         """The slide as it actually looks — its own pixels plus any text

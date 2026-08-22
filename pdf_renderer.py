@@ -107,10 +107,13 @@ def get_text_word_rects(path: str, page_index: int, scale: float) -> list:
     multiplied by `scale`, matching the QImages from render_pdf). Empty list
     if the page has no extractable text (e.g. scanned images).
 
-    A word, not a line: a card that hides a whole line of a table cell asks
-    you to recall the line, which is a different and much harder question
-    than the one the slide is actually teaching. pdfium gives a box per
-    character, so the words are the runs between the whitespace.
+    Found at word level and then merged back up: pdfium gives a box per
+    character, so the words are the runs between the whitespace, and words
+    a normal space apart rejoin into one box. That is not the same as
+    boxing the line — the merge stops at any gap wider than a space, so a
+    run of prose comes out as one box while two columns sharing a line stay
+    two. Working up from words rather than down from lines is what makes
+    the box hug the text instead of the line's full extent.
     """
     pdfium = _import_pdfium()
     words: list = []
@@ -153,7 +156,7 @@ def get_text_word_rects(path: str, page_index: int, scale: float) -> list:
         doc.close()
 
     out = []
-    for left, bottom, right, top in words:
+    for left, bottom, right, top in _join_words(words):
         w, h = right - left, top - bottom
         if w < 1.0 or h < 1.0:
             continue
@@ -162,6 +165,47 @@ def get_text_word_rects(path: str, page_index: int, scale: float) -> list:
         out.append(((left - pad) * scale, (page_h - top - pad) * scale,
                     (w + pad * 2) * scale, (h + pad * 2) * scale))
     out.sort(key=lambda r: (round(r[1]), r[0]))
+    return out
+
+
+_SPACE_GAP = 0.6    # of the line's height; wider than this is not a space
+
+
+def _join_words(words: list) -> list:
+    """Rejoin words that a reader would take as one run of text.
+
+    Words sharing a baseline and separated by no more than about a space
+    become one box; anything wider — the gap between two columns, or
+    between two cells of a borderless table — stays a break.
+    """
+    if not words:
+        return []
+    lines: list = []
+    for w in sorted(words, key=lambda r: (-(r[1] + r[3]) / 2, r[0])):
+        cy = (w[1] + w[3]) / 2
+        for line in lines:
+            ly = sum((s[1] + s[3]) / 2 for s in line) / len(line)
+            lh = max(s[3] - s[1] for s in line)
+            if abs(cy - ly) < max(lh, w[3] - w[1]) * 0.5:
+                line.append(w)
+                break
+        else:
+            lines.append([w])
+
+    out = []
+    for line in lines:
+        line.sort(key=lambda r: r[0])
+        cur = list(line[0])
+        for seg in line[1:]:
+            gap = seg[0] - cur[2]
+            if gap <= max(cur[3] - cur[1], seg[3] - seg[1]) * _SPACE_GAP:
+                cur[1] = min(cur[1], seg[1])
+                cur[2] = max(cur[2], seg[2])
+                cur[3] = max(cur[3], seg[3])
+            else:
+                out.append(cur)
+                cur = list(seg)
+        out.append(cur)
     return out
 
 

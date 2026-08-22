@@ -136,8 +136,7 @@ class ClozeChip(QFrame):
         self.setSizePolicy(QSizePolicy.Policy.Preferred,
                            QSizePolicy.Policy.Fixed)
         self._full = full
-        self.setToolTip(full if entry is None else
-                        full + "\n\nClick to edit · right-click for more")
+        self.setToolTip(full)
         if entry is not None:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -274,9 +273,7 @@ class ClozeComposer(QWidget):
 
         hint = QLabel(f"{_native('Ctrl+Shift+C')} wraps the selection")
         hint.setObjectName("clozeHint")
-        hint.setToolTip(
-            f"{_native('Ctrl+Shift+C')} wraps the selection in a new cloze\n"
-            f"{_native('Ctrl+Alt+Shift+C')} reuses the number already used")
+        hint.setToolTip(f"{_native('Ctrl+Alt+Shift+C')} reuses the last number")
         # The button sits on the hint's line rather than getting a row of its
         # own: it belongs to the editor above, and the panel has no height to
         # spare before the Add button starts crowding Create All Cards.
@@ -286,8 +283,7 @@ class ClozeComposer(QWidget):
         self._slide_text_btn.setDefault(False)
         self._slide_text_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._slide_text_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._slide_text_btn.setToolTip(
-            "Paste the text printed on this slide into the field")
+        self._slide_text_btn.setToolTip("Paste this slide's text")
         self._slide_text_btn.clicked.connect(self._pull_slide_text)
         hint_row = QHBoxLayout()
         hint_row.setContentsMargins(0, 0, 0, 0)
@@ -303,9 +299,7 @@ class ClozeComposer(QWidget):
 
         self._slide_check = QCheckBox("Add slide as extra")
         self._slide_check.setChecked(True)
-        self._slide_check.setToolTip(
-            "File this slide under the answer, captioned with the lecture "
-            "and slide number")
+        self._slide_check.setToolTip("Slide goes under the answer")
         root.addWidget(self._slide_check)
 
         foot = QHBoxLayout()

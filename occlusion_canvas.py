@@ -50,7 +50,8 @@ from .card_builder import label_fits, label_font_size
 from aqt.qt import (
     QWidget, QPainter, QPen, QColor, QRect, QPoint, QPointF,
     QPixmap, QImage, Qt, QCursor, QMenu, QAction, QKeyEvent,
-    QInputDialog, QEvent, QPolygonF, QFont, QFontMetrics, pyqtSignal,
+    QInputDialog, QEvent, QPolygonF, QFont, QFontMetrics, QTextEdit,
+    QTextOption, QFrame, pyqtSignal,
 )
 
 # ------------------------------------------------------------------ colours
@@ -126,6 +127,27 @@ def annotation_rect(a: dict, zoom: float = 1.0) -> QRect:
                  max(1, int(a["w"] * zoom)), max(1, int(a["h"] * zoom)))
 
 
+def annotation_font(base: QFont, text: str, inner: QRect) -> QFont:
+    """The largest font that fits `text` inside `inner`, wrapped.
+
+    The box is the control: there is no font size to set, it just fills what
+    you dragged. Shared with the inline editor so what you type is the size
+    you get.
+    """
+    flags = (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+             | Qt.TextFlag.TextWordWrap)
+    font = QFont(base)
+    size = max(6, int(inner.height() * 0.8))
+    while size > 6:
+        font.setPixelSize(size)
+        need = QFontMetrics(font).boundingRect(inner, int(flags), text or "X")
+        if need.height() <= inner.height() and need.width() <= inner.width():
+            break
+        size -= 1
+    font.setPixelSize(max(6, size))
+    return font
+
+
 def draw_annotation(p: QPainter, a: dict, r: QRect):
     """Paint one text annotation into `r`.
 
@@ -146,16 +168,7 @@ def draw_annotation(p: QPainter, a: dict, r: QRect):
         flags = (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
                  | Qt.TextFlag.TextWordWrap)
         inner = r.adjusted(4, 2, -4, -2)
-        font = QFont(p.font())
-        size = max(6, int(inner.height() * 0.8))
-        while size > 6:
-            font.setPixelSize(size)
-            need = QFontMetrics(font).boundingRect(inner, int(flags), text)
-            if need.height() <= inner.height() and need.width() <= inner.width():
-                break
-            size -= 1
-        font.setPixelSize(max(6, size))
-        p.setFont(font)
+        p.setFont(annotation_font(p.font(), text, inner))
         p.setPen(_ANNOT_FG)
         p.drawText(inner, int(flags), text)
     p.restore()
@@ -436,11 +449,9 @@ class OcclusionCanvas(QWidget):
     # a region was dragged out for the Detect button: x, y, w, h in image px
     scan_region = pyqtSignal(float, float, float, float)
     scan_cancelled = pyqtSignal()
-    # Text tool: a region was dragged out for new text, or existing text clicked
-    text_region = pyqtSignal(float, float, float, float)
-    text_activated = pyqtSignal(str)
     # Text tool clicked an occlusion box: edit the label written across it
     label_activated = pyqtSignal(str)
+    annotations_changed = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -473,6 +484,12 @@ class OcclusionCanvas(QWidget):
         self._scanning = False
         self._texting = False           # dragging out a new text box
         self._annots: list = []         # text written onto the slide itself
+        self._annot_sel: Optional[str] = None    # the one showing handles
+        self._annot_move: Optional[dict] = None
+        self._annot_resize: Optional[tuple] = None   # (annot, corner)
+        self._annot_press: Optional[tuple] = None    # (annot, ipos, moved)
+        self._editor: Optional[QTextEdit] = None
+        self._editing: Optional[tuple] = None        # ("annot"|"label", id)
         self._draw_shift = False        # Shift held when the draw started
         self._drag_start: Optional[QPointF] = None
         self._drag_current: Optional[QPointF] = None
@@ -537,6 +554,10 @@ class OcclusionCanvas(QWidget):
         self._nudging = False
         self._scan_armed = False
         self._scanning = False
+        self._annot_sel = None
+        self._editing = None
+        if self._editor is not None:
+            self._editor.hide()
         # keep _next_gid monotonic across slides so IDs never collide
         existing_gids = [b.group for b in self._boxes if b.group is not None]
         if existing_gids:
@@ -568,6 +589,147 @@ class OcclusionCanvas(QWidget):
         box.label = text
         self.boxes_changed.emit()
         self.update()
+
+    # ------------------------------------------------------- inline editing
+    #
+    # Text is typed where it lands, not into a dialog. The editor is a real
+    # QTextEdit parked over the thing being edited, so the caret, the
+    # selection, undo inside the field and IME all work the way they do
+    # everywhere else — none of which a modal prompt was buying us.
+
+    def _editor_widget(self) -> QTextEdit:
+        if self._editor is None:
+            ed = QTextEdit(self)
+            ed.setAcceptRichText(False)
+            ed.setFrameShape(QFrame.Shape.NoFrame)
+            ed.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            ed.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            ed.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+            ed.installEventFilter(self)
+            ed.hide()
+            self._editor = ed
+        return self._editor
+
+    def _begin_edit(self, kind: str, ident: str):
+        self._commit_edit()
+        if kind == "annot":
+            a = self._annot_by_id(ident)
+            if a is None:
+                return
+            r = annotation_rect(a, self._disp)
+            text = a.get("text", "")
+            inner = r.adjusted(4, 2, -4, -2)
+            font = annotation_font(self.font(), text or "X", inner)
+            css = ("background:#ffffff; color:#141414; border:1px solid %s;"
+                   % _ANNOT_HINT.name())
+            align = Qt.AlignmentFlag.AlignLeft
+        else:
+            box = next((b for b in self._boxes if b.id == ident), None)
+            if box is None:
+                return
+            r = box.norm().screen_rect(self._disp)
+            text = box.label
+            font = QFont(self.font())
+            font.setBold(True)
+            font.setPixelSize(max(7, int(label_font_size(self._orig_h)
+                                         * self._disp)))
+            css = ("background:rgba(20,20,20,0.72); color:#ffffff;"
+                   " border:1px solid rgba(255,255,255,0.5);")
+            align = Qt.AlignmentFlag.AlignCenter
+
+        ed = self._editor_widget()
+        ed.setStyleSheet(css)
+        ed.setFont(font)
+        ed.setPlainText(text)
+        ed.setGeometry(r)
+        ed.setAlignment(align)
+        ed.selectAll()
+        ed.show()
+        ed.raise_()
+        ed.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._editing = (kind, ident)
+        self.update()
+
+    def _commit_edit(self):
+        """Take what was typed. Empty means the thing goes away."""
+        if not self._editing or self._editor is None:
+            return
+        kind, ident = self._editing
+        text = self._editor.toPlainText().strip()
+        self._editing = None
+        self._editor.hide()
+        if kind == "annot":
+            a = self._annot_by_id(ident)
+            if a is None:
+                return
+            if text:
+                if a.get("text", "") != text:
+                    a["text"] = text
+                    self.annotations_changed.emit()
+            else:
+                self._annots = [x for x in self._annots if x["id"] != ident]
+                if self._annot_sel == ident:
+                    self._annot_sel = None
+                self.annotations_changed.emit()
+        else:
+            self.set_box_label(ident, text)
+        self.update()
+
+    def eventFilter(self, obj, ev):
+        if obj is self._editor and self._editing:
+            if ev.type() == QEvent.Type.FocusOut:
+                self._commit_edit()
+            elif ev.type() == QEvent.Type.KeyPress:
+                k = ev.key()
+                mods = ev.modifiers()
+                if k == Qt.Key.Key_Escape or (
+                        k in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                        and mods & (Qt.KeyboardModifier.ControlModifier
+                                    | Qt.KeyboardModifier.MetaModifier)):
+                    self._commit_edit()
+                    self.setFocus()
+                    return True
+                if (k in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                        and self._editing[0] == "label"):
+                    # a label is one line by definition
+                    self._commit_edit()
+                    self.setFocus()
+                    return True
+        return super().eventFilter(obj, ev)
+
+    def _commit_annots(self):
+        self.annotations_changed.emit()
+        self.update()
+
+    def _delete_annot(self):
+        if not self._annot_sel:
+            return False
+        self._annots = [a for a in self._annots if a["id"] != self._annot_sel]
+        self._annot_sel = None
+        self._commit_annots()
+        return True
+
+    def _annot_by_id(self, ident: str) -> Optional[dict]:
+        return next((a for a in self._annots if a["id"] == ident), None)
+
+    def _annot_handle_at(self, spos: QPoint):
+        """Which corner of the selected annotation a point is grabbing."""
+        if not self._annot_sel:
+            return None, None
+        a = self._annot_by_id(self._annot_sel)
+        if a is None:
+            return None, None
+        r = annotation_rect(a, self._disp)
+        s = _HANDLE_SIZE
+        corners = {"tl": r.topLeft(), "tr": r.topRight(),
+                   "bl": r.bottomLeft(), "br": r.bottomRight()}
+        for name, pt in corners.items():
+            if QRect(pt.x() - s, pt.y() - s, s * 2, s * 2).contains(spos):
+                return a, name
+        return None, None
+
+    def annotations(self) -> list:
+        return [dict(a) for a in self._annots]
 
     def set_annotations(self, annots: list):
         """Text written onto this slide. Not boxes — these are part of the
@@ -962,10 +1124,7 @@ class OcclusionCanvas(QWidget):
     def _edit_note(self, targets: set):
         current = next((b.note for b in targets if b.note), "")
         text, ok = QInputDialog.getMultiLineText(
-            self, "Card Note",
-            "Shown in the card's Notes field (below the answer):",
-            current,
-        )
+            self, "Note", "Shown under the answer:", current)
         if not ok:
             return
         self._push_undo()
@@ -1003,17 +1162,32 @@ class OcclusionCanvas(QWidget):
 
         # Text written onto the slide. Painted before the boxes, because it
         # is part of the picture: a mask drawn over one has to cover it.
+        editing_id = (self._editing[1]
+                      if (self._editing and self._editing[0] == "annot")
+                      else None)
         for a in self._annots:
             r = annotation_rect(a, self._disp)
-            draw_annotation(p, a, r)
+            if a["id"] != editing_id:
+                draw_annotation(p, a, r)
             if self._tool == "text":
                 # only while the tool is up, so they read as slide content
                 # the rest of the time
-                pen = QPen(_ANNOT_HINT, 1)
-                pen.setStyle(Qt.PenStyle.DashLine)
+                sel = a["id"] == self._annot_sel
+                pen = QPen(_ANNOT_HINT, 2 if sel else 1)
+                pen.setStyle(Qt.PenStyle.SolidLine if sel
+                             else Qt.PenStyle.DashLine)
                 p.setPen(pen)
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawRect(r)
+                if sel:
+                    p.setBrush(QColor(255, 255, 255))
+                    p.setPen(QPen(_ANNOT_HINT, 1))
+                    for pt in (r.topLeft(), r.topRight(),
+                               r.bottomLeft(), r.bottomRight()):
+                        p.drawRect(QRect(pt.x() - _HANDLE_SIZE,
+                                         pt.y() - _HANDLE_SIZE,
+                                         _HANDLE_SIZE * 2, _HANDLE_SIZE * 2))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
 
         font = p.font()
         font.setPointSize(8)
@@ -1288,15 +1462,31 @@ class OcclusionCanvas(QWidget):
             return
 
         if self._tool == "text":
-            # boxes are painted over annotations, so they take the click
-            for box in reversed(self._boxes):
-                if box.contains_screen(spos.x(), spos.y(), self._disp):
-                    self.label_activated.emit(box.id)
-                    return
+            self._commit_edit()
+            # a corner of the selected text box — resize
+            a, corner = self._annot_handle_at(spos)
+            if a is not None:
+                self._annot_resize = (a, corner)
+                self._pre_annots = [dict(x) for x in self._annots]
+                return
+            # inside a text box — move it, or edit it if the mouse never moves
             hit = self._annot_at(spos)
             if hit is not None:
-                self.text_activated.emit(hit["id"])
+                self._annot_sel = hit["id"]
+                self._annot_press = [hit, ipos, False]
+                self._pre_annots = [dict(x) for x in self._annots]
+                self.update()
                 return
+            # an occlusion box — label its mask
+            for box in reversed(self._boxes):
+                if box.contains_screen(spos.x(), spos.y(), self._disp):
+                    if label_fits(box.norm().w, box.norm().h, self._orig_h):
+                        self._annot_sel = None
+                        self._begin_edit("label", box.id)
+                    else:
+                        self.label_activated.emit(box.id)
+                    return
+            self._annot_sel = None
             self._texting = True
             self._drag_start = ipos
             self._drag_current = ipos
@@ -1363,6 +1553,32 @@ class OcclusionCanvas(QWidget):
         self.update()
 
     def mouseMoveEvent(self, event):
+        if self._annot_resize is not None:
+            a, corner = self._annot_resize
+            ip = self._to_img(event.pos())
+            x0, y0 = a["x"], a["y"]
+            x1, y1 = a["x"] + a["w"], a["y"] + a["h"]
+            if "l" in corner: x0 = ip.x()
+            else:             x1 = ip.x()
+            if "t" in corner: y0 = ip.y()
+            else:             y1 = ip.y()
+            a["x"], a["y"] = int(min(x0, x1)), int(min(y0, y1))
+            a["w"], a["h"] = max(12, int(abs(x1 - x0))), max(10, int(abs(y1 - y0)))
+            self.update()
+            return
+        if self._annot_press is not None:
+            a, start, moved = self._annot_press
+            ip = self._to_img(event.pos())
+            if not moved and (abs(ip.x() - start.x()) > 3
+                              or abs(ip.y() - start.y()) > 3):
+                self._annot_press[2] = moved = True
+                self._annot_move = a
+            if moved:
+                a["x"] = int(a["x"] + ip.x() - start.x())
+                a["y"] = int(a["y"] + ip.y() - start.y())
+                self._annot_press[1] = ip
+                self.update()
+            return
         if self._texting:
             self._drag_current = self._to_img(event.pos())
             self.update()
@@ -1430,6 +1646,16 @@ class OcclusionCanvas(QWidget):
             if self._banding:
                 self._apply_band_selection()
             self.update()
+            return
+
+        if self._tool == "text":
+            a, corner = self._annot_handle_at(spos)
+            if a is not None:
+                self.setCursor(_dir_cursor(_HANDLE_DIR[corner]))
+            elif self._annot_at(spos) is not None:
+                self.setCursor(QCursor(Qt.CursorShape.SizeAllCursor))
+            else:
+                self._update_cursor()
             return
 
         # while armed for Detect there is nothing to hover: no handles, no
@@ -1506,6 +1732,20 @@ class OcclusionCanvas(QWidget):
             self.update()
             return
 
+        if self._annot_resize is not None:
+            self._annot_resize = None
+            self._commit_annots()
+            return
+        if self._annot_press is not None:
+            a, _, moved = self._annot_press
+            self._annot_press = None
+            self._annot_move = None
+            if moved:
+                self._commit_annots()
+            else:
+                self._begin_edit("annot", a["id"])
+            return
+
         if self._texting:
             start, cur = self._drag_start, self._drag_current
             self._texting = False
@@ -1517,7 +1757,14 @@ class OcclusionCanvas(QWidget):
             x, y = min(start.x(), cur.x()), min(start.y(), cur.y())
             w, h = abs(cur.x() - start.x()), abs(cur.y() - start.y())
             if w >= 12 and h >= 10:
-                self.text_region.emit(x, y, w, h)
+                a = {"id": uuid.uuid4().hex, "x": int(x), "y": int(y),
+                     "w": int(w), "h": int(h), "text": ""}
+                self._annots.append(a)
+                self._annot_sel = a["id"]
+                self.annotations_changed.emit()
+                # straight into typing — that is the whole point of dragging
+                # one out, and an empty one removes itself if you type nothing
+                self._begin_edit("annot", a["id"])
             return
 
         if self._scanning:
@@ -1654,6 +1901,11 @@ class OcclusionCanvas(QWidget):
             self.handle_arrow(key, shift)
             return
 
+        if (key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace)
+                and self._tool == "text" and self._annot_sel):
+            self._delete_annot()
+            return
+
         if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             if self._selected:
                 self._delete_selected()
@@ -1672,6 +1924,10 @@ class OcclusionCanvas(QWidget):
             return
 
         if key == Qt.Key.Key_Escape:
+            if self._annot_sel:
+                self._annot_sel = None
+                self.update()
+                return
             if self._scan_armed:
                 self._cancel_scan()
                 return
