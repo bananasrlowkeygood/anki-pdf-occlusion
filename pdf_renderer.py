@@ -244,8 +244,10 @@ def _tidy_page_text(raw: str) -> str:
 # instead of the several it would be split into.
 
 _RULE_PT = 4.0       # a path this thin in one axis is a ruling line, not a box
+_RULE_RATIO = 0.05   # ...or this slender, which catches a thick but long border
 _CLUSTER_PT = 3.0    # rules within this of one another are the same gridline
 _MIN_CELL_PT = 6.0   # smaller than this and it is a border artefact, not a cell
+_MAX_CELL_FRAC = 0.8  # a "cell" this much of the page is the page, not a cell
 
 
 def get_table_cell_rects(path: str, page_index: int, scale: float) -> list:
@@ -256,29 +258,36 @@ def get_table_cell_rects(path: str, page_index: int, scale: float) -> list:
     one of them is the caller's job. Empty list if the page has no ruled
     table — a borderless one, or a picture of one, has no rules to read.
     """
-    vrules, hrules, boxes, page_h = _page_rules(path, page_index)
+    vrules, hrules, page_w, page_h = _page_rules(path, page_index)
 
     cells: list = []
     for vs, hs in _split_tables(vrules, hrules):
         cells.extend(_cells_from_rules(vs, hs))
-    if not cells:
-        cells = _dedupe_cells(boxes)
 
+    page_area = max(page_w * page_h, 1.0)
     out = []
     for left, bottom, right, top in cells:
-        if right - left < _MIN_CELL_PT or top - bottom < _MIN_CELL_PT:
+        w, h = right - left, top - bottom
+        if w < _MIN_CELL_PT or h < _MIN_CELL_PT:
             continue
-        out.append((left * scale, (page_h - top) * scale,
-                    (right - left) * scale, (top - bottom) * scale))
+        # A slide with a full-page background panel contributes that panel's
+        # four sides as rules. On its own it forms a 1x1 "grid" covering the
+        # whole slide, which is how detection used to hand back one box over
+        # the entire page. Nothing that big is a table cell.
+        if w * h >= page_area * _MAX_CELL_FRAC:
+            continue
+        out.append((left * scale, (page_h - top) * scale, w * scale, h * scale))
     out.sort(key=lambda r: (round(r[1]), r[0]))    # down the page, then across
     return out
 
 
 def _page_rules(path: str, page_index: int):
-    """Every path object on the page, split into v-rules, h-rules and boxes.
+    """Every path object on the page, reduced to vertical and horizontal rules.
 
     Rules keep their extent, not just their position: it is what says which
-    table a rule belongs to, and which cells it actually bounds.
+    table a rule belongs to, and which cells it actually bounds. A rect that
+    is not a rule contributes its four sides, so a table drawn as one stroked
+    box per cell forms a grid just like one drawn as lines.
     """
     pdfium = _import_pdfium()
     import pypdfium2.raw as pdfium_c
@@ -287,22 +296,29 @@ def _page_rules(path: str, page_index: int):
     try:
         page = doc[page_index]
         try:
-            _, page_h = page.get_size()
-            vrules, hrules, boxes = [], [], []
+            page_w, page_h = page.get_size()
+            page_area = max(page_w * page_h, 1.0)
+            vrules, hrules = [], []
             for obj in page.get_objects(filter=[pdfium_c.FPDF_PAGEOBJ_PATH]):
                 try:
                     left, bottom, right, top = obj.get_bounds()
                 except Exception:
                     continue
                 w, h = right - left, top - bottom
-                if w <= _RULE_PT and h > _RULE_PT * 2:
-                    vrules.append(((left + right) / 2.0, bottom, top))
-                elif h <= _RULE_PT and w > _RULE_PT * 2:
-                    hrules.append(((bottom + top) / 2.0, left, right))
-                elif w > _RULE_PT and h > _RULE_PT:
-                    boxes.append((left, bottom, right, top))
-                    # a stroked cell contributes its four sides too, so a
-                    # table drawn that way still forms a grid
+                if w <= 0 or h <= 0:
+                    continue
+                # the slide's own background panel is not part of any table
+                if w * h >= page_area * _MAX_CELL_FRAC:
+                    continue
+                thin, long = min(w, h), max(w, h)
+                if long <= _RULE_PT * 2:
+                    continue
+                if thin <= _RULE_PT or thin / long <= _RULE_RATIO:
+                    if h > w:
+                        vrules.append(((left + right) / 2.0, bottom, top))
+                    else:
+                        hrules.append(((bottom + top) / 2.0, left, right))
+                else:
                     vrules.append((left, bottom, top))
                     vrules.append((right, bottom, top))
                     hrules.append((bottom, left, right))
@@ -311,7 +327,7 @@ def _page_rules(path: str, page_index: int):
             page.close()
     finally:
         doc.close()
-    return vrules, hrules, boxes, page_h
+    return vrules, hrules, page_w, page_h
 
 
 def _split_tables(vrules: list, hrules: list) -> list:
@@ -348,6 +364,8 @@ def _split_tables(vrules: list, hrules: list) -> list:
     for j, r in enumerate(hrules):
         groups.setdefault(find(n + j), ([], []))[1].append(r)
 
+    # 3 lines each way is the smallest thing worth calling a table: two rules
+    # in one direction describe a single strip, not a grid.
     return [(vs, hs) for vs, hs in groups.values()
             if len(vs) >= 2 and len(hs) >= 2]
 
@@ -370,6 +388,9 @@ def _cells_from_rules(vrules: list, hrules: list) -> list:
     """One table's cells, merged cells included as single boxes."""
     xs = _cluster([r[0] for r in vrules], _CLUSTER_PT)
     ys = _cluster([r[0] for r in hrules], _CLUSTER_PT)
+    # A 1x1 grid is a rectangle someone drew, not a table.
+    if len(xs) < 3 and len(ys) < 3:
+        return []
     if len(xs) < 2 or len(ys) < 2:
         return []
 
@@ -430,23 +451,3 @@ def _covers(spans: list, lo: float, hi: float) -> bool:
     pad = min(_CLUSTER_PT, (hi - lo) * 0.25)
     return any(a - _CLUSTER_PT <= lo + pad and b + _CLUSTER_PT >= hi - pad
                for a, b in spans)
-
-
-def _dedupe_cells(boxes: list) -> list:
-    """Fallback for stroked rects that never formed a grid: drop any rect
-    that swallows several others, which is a frame rather than a cell."""
-    if not boxes:
-        return []
-    kept = []
-    for i, a in enumerate(boxes):
-        if sum(1 for j, b in enumerate(boxes)
-               if i != j and _contains(a, b)) < 2:
-            kept.append(a)
-    return kept or boxes
-
-
-def _contains(outer: tuple, inner: tuple, slack: float = 1.0) -> bool:
-    ol, ob, orr, ot = outer
-    il, ib, ir, it = inner
-    return (ol - slack <= il and ob - slack <= ib
-            and orr + slack >= ir and ot + slack >= it)

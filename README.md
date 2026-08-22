@@ -6,7 +6,7 @@
 
 **PDF Occlusion** is an Anki add-on that creates image occlusion cards directly from PDF lecture slides. No more importing one image at a time. Open any PDF (or several at once), draw boxes over what you want to memorize, and generate cards in bulk. Built for studying from slide-heavy lectures.
 
-- **Auto-detect text** — one click places boxes over every text line on a slide
+- **Detect** — drag over part of a slide and it boxes it for you: a ruled table cell by cell, anything else line by line
 - **Grouping, notes, marquee selection, pinch-to-zoom**
 - **Sessions** — your work saves automatically per PDF; reopen it later and *Create All Cards* **updates the existing cards in place** (review history intact) instead of duplicating them
 - **Occlusion mode per PDF, per slide, or per box** — mix *Hide All, Show One* and *Hide One, Show One* freely
@@ -38,19 +38,21 @@
 
 2. Click `Open PDF` — select one PDF or several at once. The arrow next to the button lists recent sessions to resume.
 
-3. Click and drag to place boxes over the content you want to memorize — or click `Detect Text` to place them automatically.
+3. Click and drag to place boxes over the content you want to memorize — or click `Detect` and drag over a region to have them placed for you.
 
 4. *(Optional)* Select multiple boxes and press `G` to group them into a single card region. Double-click a box to attach a note (shown under the answer).
 
-5. Press `Space` to mark a slide as skipped.
-
-6. Pick a deck (type a new name to create one) and click `Create All Cards`.
+5. Pick a deck (type a new name to create one) and click `Create All Cards`.
 
 ## Editing Tools
 
 - **Draw** (`D`) — drag on empty space to draw a box; hold `Shift` while drawing and the new box joins the selection's group, so a multi-part card can be sketched in one pass
 - **Select** (`V`) — drag on empty space to marquee-select boxes; `Shift` adds to the selection
-- **Detect Text** — auto-places boxes over each text line on the slide (`T`); detected boxes come in selected, so `Del` discards them if the result isn't useful
+- **Detect** (`T`) — click it, then **drag over the part of the slide to scan**; everything outside the region dims so it's clear what's about to be boxed. `Esc` cancels. It never runs on the whole slide: a slide usually has one table worth boxing plus a title, a footer and a page number that aren't.
+  - A **ruled table** in the region is boxed **cell by cell**, read from the table's own borders in the PDF. Merged cells come out as one box.
+  - Anything else is boxed **line by line**.
+  - Rescanning somewhere you've already scanned won't stack a second copy of the same boxes.
+  - Both read the PDF's text and vector data, so a slide that is just a picture has nothing to detect — draw those by hand.
 - **Move** — drag a box (a multi-selection moves together); `Shift`-drag a grouped box to move its whole group
 - **Resize** — drag any corner handle of a selected box
 - **Zoom** — pinch on the trackpad or `Ctrl`+scroll, anchored at the pointer; `Ctrl+0` fits the slide
@@ -63,7 +65,7 @@
 
 ## Sessions & Editing After Creation
 
-Your work is saved automatically per PDF (boxes, skipped slides, mode overrides, lecture name) when the dialog closes. Reopen the same PDF — via `Open PDF` or its recent-sessions arrow — and you'll be offered to resume.
+Your work is saved automatically per PDF (boxes, mode overrides, lecture name) when the dialog closes. Reopen the same PDF — via `Open PDF` or its recent-sessions arrow — and you'll be offered to resume.
 
 Because each box remembers which card it produced, **Create All Cards is safe to run again**: existing cards are *updated in place* (masks, header — with scheduling and review history untouched), new boxes become new cards, and if you deleted boxes you'll be asked whether to delete their cards too.
 
@@ -83,9 +85,8 @@ Boxes with an override show a small `AO` / `OA` badge in the editor.
 |-----|--------|
 | `←` / `→` | Navigate slides (nudge instead when boxes are selected) |
 | `PgUp` / `PgDn` | Navigate slides (always) |
-| `Space` | Skip / unskip current slide |
 | `D` / `V` | Draw tool / Select tool |
-| `T` | Detect text on current slide |
+| `T` | Detect — then drag over the region to scan |
 | `G` / `U` | Group / ungroup selected boxes |
 | `N` | Add / edit note on selected box(es) |
 | `Shift`+drag box | Move a grouped box's whole group |

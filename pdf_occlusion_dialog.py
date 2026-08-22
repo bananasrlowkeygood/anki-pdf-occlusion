@@ -129,7 +129,6 @@ class PDFOcclusionDialog(QDialog):
         self._pages: list[QImage] = []
         self._render_scale: float = 1.0
         self._page_index: int = 0
-        self._skipped: set[int] = set()
         self._boxes: dict[int, list[dict]] = {}
         self._page_modes: dict[int, str] = {}   # global page idx -> "ao"/"oa"
         # Cloze: the composer is a panel to the right of the slide, the
@@ -138,9 +137,6 @@ class PDFOcclusionDialog(QDialog):
         # _cloze_stale holds the notes of records deleted since.
         self._cloze_cards: dict[int, list] = {}
         self._cloze_stale: list[int] = []
-        # What each detect button put on each slide, so a second click can
-        # take it back off: (page, "text"|"table") -> the ids it added.
-        self._detected: dict = {}
         self._fly = None            # in-flight card animation, kept alive
         self._fitted = False        # is the current zoom a fit? (see _refit)
 
@@ -280,21 +276,14 @@ class PDFOcclusionDialog(QDialog):
         self._select_btn.setToolTip("Drag to select boxes (V)")
         self._select_btn.clicked.connect(lambda: self._set_tool("select"))
 
-        self._detect_btn = QPushButton("Detect Text")
+        self._detect_btn = QPushButton("Detect")
         self._detect_btn.setCheckable(True)
         self._detect_btn.setToolTip(
-            "Auto-box the text on this slide (T)\n\n"
-            "Click again to take the boxes back off.\n"
-            "With a box selected, only looks inside it.")
-        self._detect_btn.clicked.connect(self._detect_text)
-
-        self._table_btn = QPushButton("Detect Table")
-        self._table_btn.setCheckable(True)
-        self._table_btn.setToolTip(
-            "Auto-box the cells of a ruled table (Shift+T)\n\n"
-            "Click again to take the boxes back off.\n"
-            "With a box selected, only looks inside it.")
-        self._table_btn.clicked.connect(self._detect_table)
+            "Auto-box part of this slide (T)\n\n"
+            "Click, then drag out the part to scan. A ruled table there is "
+            "boxed cell by cell, anything else line by line.\n"
+            "Esc cancels.")
+        self._detect_btn.clicked.connect(self._arm_detect)
 
         self._cloze_btn = QPushButton("Cloze")
         self._cloze_btn.setToolTip(
@@ -315,8 +304,12 @@ class PDFOcclusionDialog(QDialog):
         row3.addWidget(self._select_btn)
         row3.addSpacing(10)
         row3.addWidget(self._detect_btn)
-        row3.addWidget(self._table_btn)
         row3.addWidget(self._cloze_btn)
+        row3.addSpacing(10)
+        self._detect_hint = QLabel("")
+        self._detect_hint.setStyleSheet(
+            f"color:{_accent_color()}; font-size:11px; font-weight:bold;")
+        row3.addWidget(self._detect_hint)
         row3.addStretch()
         row3.addWidget(slide_mode_label)
         row3.addWidget(self._page_mode_combo)
@@ -327,6 +320,8 @@ class PDFOcclusionDialog(QDialog):
         self._canvas.boxes_changed.connect(self._on_boxes_changed)
         self._canvas.slide_nav.connect(self._on_slide_nav)
         self._canvas.zoom_gesture.connect(self._on_zoom_gesture)
+        self._canvas.scan_region.connect(self._on_scan_region)
+        self._canvas.scan_cancelled.connect(self._on_scan_cancelled)
         self._scroll = QScrollArea()
         self._scroll.setWidget(self._canvas)
         self._scroll.setWidgetResizable(False)
@@ -366,9 +361,6 @@ class PDFOcclusionDialog(QDialog):
         self._prev_btn = QPushButton("← Prev")
         self._prev_btn.setToolTip("Previous slide (PgUp)")
         self._prev_btn.clicked.connect(self._prev_page)
-        self._skip_btn = QPushButton("Skip")
-        self._skip_btn.setToolTip("Skip / unskip this slide (Space)")
-        self._skip_btn.clicked.connect(self._toggle_skip)
         self._next_btn = QPushButton("Next →")
         self._next_btn.setToolTip("Next slide (PgDn)")
         self._next_btn.clicked.connect(self._next_page)
@@ -383,7 +375,7 @@ class PDFOcclusionDialog(QDialog):
         self._create_btn.clicked.connect(self._create_cards)
         self._create_btn.setStyleSheet(_PRIMARY_BTN_QSS)
 
-        for w in (self._prev_btn, self._skip_btn, self._next_btn):
+        for w in (self._prev_btn, self._next_btn):
             bot.addWidget(w)
         bot.addStretch()
         bot.addWidget(self._count_label)
@@ -407,9 +399,9 @@ class PDFOcclusionDialog(QDialog):
         # first three because you type into them, the last two because they
         # have no shortcut and would otherwise be mouse-only.
         for w in (self._draw_btn, self._select_btn, self._detect_btn,
-                  self._table_btn, self._cloze_btn,
+                  self._cloze_btn,
                   self._zoom_out_btn, self._zoom_in_btn, self._fit_btn,
-                  self._prev_btn, self._skip_btn, self._next_btn):
+                  self._prev_btn, self._next_btn):
             w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         # Clicking the grey margin around the slide targets the scroll area,
         # not the canvas; without this it would take focus and cause the same
@@ -431,11 +423,9 @@ class PDFOcclusionDialog(QDialog):
                       lambda k=key, s=keys.startswith("Shift"): self._arrow(k, s))
         QShortcut(QKeySequence(Qt.Key.Key_PageUp), self, self._prev_page)
         QShortcut(QKeySequence(Qt.Key.Key_PageDown), self, self._next_page)
-        QShortcut(QKeySequence(Qt.Key.Key_Space), self, self._toggle_skip)
         QShortcut(QKeySequence("D"), self, lambda: self._set_tool("draw"))
         QShortcut(QKeySequence("V"), self, lambda: self._set_tool("select"))
-        QShortcut(QKeySequence("T"), self, self._detect_text)
-        QShortcut(QKeySequence("Shift+T"), self, self._detect_table)
+        QShortcut(QKeySequence("T"), self, self._arm_detect)
         # V for Vasu, who asked for the cloze composer. Plain V is already
         # the Select tool, so it takes the modifiers.
         QShortcut(QKeySequence("Ctrl+Shift+V"), self, self._open_cloze)
@@ -647,10 +637,8 @@ class PDFOcclusionDialog(QDialog):
         self._docs = docs
         self._pages = all_pages
         self._page_index = 0
-        self._skipped.clear()
         self._boxes.clear()
         self._page_modes.clear()
-        self._detected.clear()
 
         self._maybe_resume_sessions(silent=silent_resume)
 
@@ -725,10 +713,6 @@ class PDFOcclusionDialog(QDialog):
                         restored.append(entry)
                     self._cloze_cards[page] = restored
 
-            for local in s.get("skipped", []):
-                if 0 <= int(local) < doc["count"]:
-                    self._skipped.add(doc["start"] + int(local))
-
             for k, m in (s.get("page_modes") or {}).items():
                 try:
                     local = int(k)
@@ -772,8 +756,6 @@ class PDFOcclusionDialog(QDialog):
                 "lecture": doc["lecture"],
                 "notes_pdf": doc.get("notes_pdf", ""),
                 "boxes": boxes,
-                "skipped": sorted(
-                    i - start for i in self._skipped if start <= i < start + count),
                 "page_modes": {
                     str(i - start): m for i, m in self._page_modes.items()
                     if start <= i < start + count},
@@ -923,101 +905,108 @@ class PDFOcclusionDialog(QDialog):
             self._page_index += 1
             self._show_page()
 
-    def _toggle_skip(self):
-        if not self._pages:
-            return
-        idx = self._page_index
-        self._skipped.discard(idx) if idx in self._skipped else self._skipped.add(idx)
         self._update_controls()
         self._refresh_count()
 
     def _on_boxes_changed(self):
         self._refresh_count()
-        self._sync_detect_btns()
 
-    # ------------------------------------------------------- text detection --
+    # ------------------------------------------------------------ detection --
+    #
+    # Detect never runs on the whole slide. Click it and it arms the canvas;
+    # the next drag says which part to scan, and only that part is scanned.
+    # A slide usually has one table worth boxing and a title, a footer and a
+    # page number that are not — so "everything on the slide" was almost
+    # never the right answer, and undoing it was busywork.
 
-    def _detect_text(self):
-        self._run_detect("text")
-
-    def _detect_table(self):
-        self._run_detect("table")
-
-    def _sync_detect_btns(self):
-        """Show a detect button as on only while its boxes are still there.
-
-        Undo, Delete and a hand-edited slide all reach the boxes behind the
-        button's back, so the state is read off the canvas rather than
-        remembered.
-        """
-        live = self._canvas.box_ids() if self._canvas.has_image() else set()
-        for kind, btn in (("text", self._detect_btn),
-                          ("table", self._table_btn)):
-            ids = self._detected.get((self._page_index, kind), set())
-            btn.setChecked(bool(ids & live))
-
-    def _run_detect(self, kind: str):
-        """Detect boxes, or take back the ones this button last put down.
-
-        Scope: whatever is selected. Draw a rectangle round the one table on
-        a busy slide, leave it selected, and only that rectangle is scanned —
-        the rectangle itself is then consumed by the boxes found inside it.
-        Nothing selected means the whole slide, as it always did.
-        """
+    def _arm_detect(self):
+        """Click 1 of 2: wait for the region. Clicking again stands down."""
         if not self._pages:
+            self._detect_btn.setChecked(False)
             return
-        key = (self._page_index, kind)
-        live = self._canvas.box_ids()
-        mine = self._detected.get(key, set()) & live
-        if mine:
-            # second click: off again
-            self._canvas.replace_boxes(mine, [])
-            self._detected.pop(key, None)
-            self._sync_detect_btns()
+        if self._canvas.scan_armed():
+            self._canvas.arm_scan(False)
+            self._detect_btn.setChecked(False)
+            self._say_detect("")
             return
+        self._canvas.arm_scan(True)
+        self._detect_btn.setChecked(True)
+        self._say_detect("Drag over the part to scan · Esc cancels")
 
+    def _on_scan_cancelled(self):
+        self._detect_btn.setChecked(False)
+        self._say_detect("")
+
+    def _on_scan_region(self, x: float, y: float, w: float, h: float):
+        """Click 2 of 2: box whatever is inside the region just dragged out.
+
+        Cells if a ruled table is in there, lines of text if not — which is
+        what the slide itself decides, so there is nothing for the button to
+        ask about.
+        """
+        self._detect_btn.setChecked(False)
+        self._say_detect("")
         doc = self._doc_for_page(self._page_index)
         if not doc:
             return
         local = self._page_index - doc["start"]
-        finder = get_table_cell_rects if kind == "table" else get_text_line_rects
+        region = (x, y, w, h)
+
         try:
-            rects = finder(doc["path"], local, self._render_scale)
+            rects = [r for r in get_table_cell_rects(
+                doc["path"], local, self._render_scale)
+                if _centre_inside(r, region)]
+            kind = "table"
+            if len(rects) < 2:
+                rects = [r for r in get_text_line_rects(
+                    doc["path"], local, self._render_scale)
+                    if _centre_inside(r, region)]
+                kind = "text"
         except Exception as exc:
             showWarning(f"Detection failed:\n{exc}")
             return
 
-        region = self._canvas.selection_bounds()
-        if region:
-            rects = [r for r in rects if _centre_inside(r, region)]
-
+        found = len(rects)
+        rects = [r for r in rects if not self._already_boxed(r)]
         if not rects:
-            showInfo(self._nothing_found(kind, bool(region)))
+            if found:
+                # scanned the same place twice — say so rather than claim the
+                # region was empty, which it plainly was not
+                self._say_detect("Already boxed", transient=True)
+                return
+            showInfo(
+                "Nothing found to box in there.\n\n"
+                "A ruled table is boxed cell by cell and anything else line "
+                "by line, but both read the PDF's own text and vector data — "
+                "a slide that is just a picture has neither. Draw the boxes "
+                "by hand there."
+            )
             return
 
-        dicts = [{"x": int(x), "y": int(y), "w": int(w), "h": int(h),
-                  "group": None, "shape": "rect", "id": uuid.uuid4().hex}
-                 for x, y, w, h in rects]
-        # the boxes found inside the scan region replace it
-        consumed = self._canvas.selected_ids() if region else set()
-        self._canvas.replace_boxes(consumed, dicts)
-        self._detected[key] = {d["id"] for d in dicts}
-        self._sync_detect_btns()
+        self._canvas.add_boxes([
+            {"x": int(rx), "y": int(ry), "w": int(rw), "h": int(rh),
+             "group": None, "shape": "rect", "id": uuid.uuid4().hex}
+            for rx, ry, rw, rh in rects])
+        self._say_detect(
+            f"{len(rects)} {'cell' if kind == 'table' else 'line'}"
+            f"{'s' if len(rects) != 1 else ''} boxed", transient=True)
 
-    @staticmethod
-    def _nothing_found(kind: str, scoped: bool) -> str:
-        where = "inside the selection" if scoped else "on this slide"
-        if kind == "table":
-            return (
-                f"No ruled table found {where}.\n\n"
-                "Detect Table reads the table's own borders out of the PDF, so "
-                "it needs a table that was drawn with them — not a picture of "
-                "one, and not a borderless layout. Try Detect Text instead."
-            )
-        return (
-            f"No text found {where}.\n\n"
-            "It is probably a scanned image — draw boxes by hand instead."
-        )
+    def _already_boxed(self, rect: tuple, slack: int = 3) -> bool:
+        """Is this rect already on the slide? Scanning the same region twice
+        should not leave two boxes stacked on every line of it."""
+        x, y, w, h = rect
+        for b in self._canvas.get_boxes():
+            if (abs(b["x"] - x) <= slack and abs(b["y"] - y) <= slack
+                    and abs(b["w"] - w) <= slack and abs(b["h"] - h) <= slack):
+                return True
+        return False
+
+    def _say_detect(self, msg: str, transient: bool = False):
+        """Say what Detect is waiting for, or what it just did."""
+        self._detect_hint.setText(msg)
+        if transient and msg:
+            QTimer.singleShot(3000, lambda: self._detect_hint.setText("")
+                              if self._detect_hint.text() == msg else None)
 
     # -------------------------------------------------------------- counter --
 
@@ -1025,8 +1014,6 @@ class PDFOcclusionDialog(QDialog):
         """Cards that Create All Cards would make right now, across all slides."""
         total = 0
         for i in range(len(self._pages)):
-            if i in self._skipped:
-                continue
             if i == self._page_index and self._canvas.has_image():
                 boxes = self._canvas.get_boxes()
             else:
@@ -1061,15 +1048,12 @@ class PDFOcclusionDialog(QDialog):
         has = bool(self._pages)
         self._prev_btn.setEnabled(has and self._page_index > 0)
         self._next_btn.setEnabled(has and self._page_index < len(self._pages) - 1)
-        self._skip_btn.setEnabled(has)
         self._create_btn.setEnabled(has)
         self._zoom_in_btn.setEnabled(has)
         self._zoom_out_btn.setEnabled(has)
         self._fit_btn.setEnabled(has)
         self._detect_btn.setEnabled(has)
-        self._table_btn.setEnabled(has)
         self._cloze_btn.setEnabled(has)
-        self._sync_detect_btns()
         self._page_mode_combo.setEnabled(has)
         self._sync_notes_pdf_btn()
 
@@ -1080,12 +1064,7 @@ class PDFOcclusionDialog(QDialog):
             prefix = ""
             if doc and len(self._docs) > 1:
                 prefix = f"{os.path.basename(doc['path'])} — "
-            skipped = "  [SKIPPED]" if idx in self._skipped else ""
-            self._page_label.setText(f"{prefix}Slide {idx + 1} / {n}{skipped}")
-            self._skip_btn.setStyleSheet(
-                f"color:{_accent_color()}; font-weight:bold;"
-                if idx in self._skipped else ""
-            )
+            self._page_label.setText(f"{prefix}Slide {idx + 1} / {n}")
         else:
             self._page_label.setText("No PDF loaded")
 
@@ -1244,10 +1223,8 @@ class PDFOcclusionDialog(QDialog):
             to_create = [
                 (i - start, self._pages[i], self._boxes[i])
                 for i in range(start, start + count)
-                if i not in self._skipped and self._boxes.get(i)
+                if self._boxes.get(i)
             ]
-            # Cloze cards are written by hand, one at a time, so a skipped
-            # slide doesn't discard them the way it discards its boxes.
             cloze = []
             for i in range(start, start + count):
                 for card in self._cloze_cards.get(i, []):

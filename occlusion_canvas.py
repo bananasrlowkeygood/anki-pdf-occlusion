@@ -65,6 +65,8 @@ _HANDLE_SIZE      = 5   # half-size in screen px
 
 _BAND_FILL        = QColor(131, 110, 170, 40)   # rubber-band marquee
 _BAND_BORDER      = QColor(131, 110, 170, 220)
+_SCAN_SHADE       = QColor(0, 0, 0, 90)         # outside the Detect region
+_SCAN_BORDER      = QColor(131, 110, 170, 240)
 
 _BADGE_BG         = QColor(0, 0, 0, 120)
 _BADGE_FG         = QColor(255, 255, 255, 230)
@@ -377,6 +379,9 @@ class OcclusionCanvas(QWidget):
     # Pinch / Ctrl+scroll: (zoom delta, cursor position in canvas coords).
     # The dialog owns zoom state, so it applies the change and re-anchors.
     zoom_gesture = pyqtSignal(float, QPoint)
+    # a region was dragged out for the Detect button: x, y, w, h in image px
+    scan_region = pyqtSignal(float, float, float, float)
+    scan_cancelled = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -404,6 +409,9 @@ class OcclusionCanvas(QWidget):
         self._drawing = False
         self._banding = False           # rubber-band selection (select tool)
         self._band_base_sel: set = set()
+        # Detect arms the canvas for one region drag and then stands down.
+        self._scan_armed = False
+        self._scanning = False
         self._draw_shift = False        # Shift held when the draw started
         self._drag_start: Optional[QPointF] = None
         self._drag_current: Optional[QPointF] = None
@@ -443,9 +451,14 @@ class OcclusionCanvas(QWidget):
         """Active tool: "draw" (drag draws boxes) or "select" (drag marquee-selects)."""
         if tool in ("draw", "select"):
             self._tool = tool
-            self.setCursor(QCursor(
-                Qt.CursorShape.CrossCursor if tool == "draw"
-                else Qt.CursorShape.ArrowCursor))
+            self._update_cursor()
+
+    def _update_cursor(self):
+        """The resting cursor for the current mode."""
+        self.setCursor(QCursor(
+            Qt.CursorShape.CrossCursor
+            if (self._scan_armed or self._tool == "draw")
+            else Qt.CursorShape.ArrowCursor))
 
     def tool(self) -> str:
         return self._tool
@@ -460,6 +473,8 @@ class OcclusionCanvas(QWidget):
         self._undo.clear()
         self._redo.clear()
         self._nudging = False
+        self._scan_armed = False
+        self._scanning = False
         # keep _next_gid monotonic across slides so IDs never collide
         existing_gids = [b.group for b in self._boxes if b.group is not None]
         if existing_gids:
@@ -527,22 +542,138 @@ class OcclusionCanvas(QWidget):
     def selection_count(self) -> int:
         return len(self._selected)
 
-    def selection_bounds(self) -> Optional[tuple]:
-        """The rect the selected boxes span, in image pixels, or None.
+    def arm_scan(self, on: bool = True):
+        """Wait for one region to be dragged out, for the Detect button.
 
-        This is what scopes the detect buttons: draw a box round the one
-        table you care about, leave it selected, and detection only looks
-        inside it. Rotated boxes contribute their upright bounds — a scan
-        region only has to say roughly where to look.
+        While armed the canvas does nothing else — no drawing, no selecting,
+        no moving a box out from under the drag — because the whole point is
+        that the next drag says where to look and nothing else.
         """
-        if not self._selected:
-            return None
-        # zoom 1.0 == image pixels, which is the space boxes are stored in
-        rect = None
+        self._scan_armed = bool(on)
+        self._scanning = False
+        self._drag_start = None
+        self._drag_current = None
+        self._update_cursor()
+        self.update()
+
+    def scan_armed(self) -> bool:
+        return self._scan_armed
+
+    def _cancel_scan(self):
+        was = self._scan_armed
+        self._scan_armed = False
+        self._scanning = False
+        self._drag_start = None
+        self._drag_current = None
+        self._update_cursor()
+        self.update()
+        if was:
+            self.scan_cancelled.emit()
+
+    def add_boxes(self, dicts: list[dict], select: bool = False):
+        """Add boxes programmatically (detection), as one undo step.
+
+        The selection is cleared unless asked for, and detection does not
+        ask: dropping a run's own output into the selection would put every
+        box it just made one stray G or Delete away from being changed at
+        once.
+        """
+        if not dicts:
+            return
+        self._push_undo()
+        added = []
+        for d in dicts:
+            box = _Box.from_dict(d)
+            self._boxes.append(box)
+            added.append(box)
+        self._selected = set(added) if select else set()
+        self.boxes_changed.emit()
+        self.update()
+
+    def set_zoom(self, zoom: float):
+        self._zoom = max(0.1, min(4.0, zoom))
+        self._apply_size()
+        self.update()
+
+    def zoom(self) -> float:
+        return self._zoom
+
+    def group_selected(self):
+        """Assign selected boxes to a new shared group."""
+        if len(self._selected) < 2:
+            return
+        # Already exactly one whole group? Nothing to do — this also makes a
+        # held-down G key (auto-repeat) harmless instead of minting a fresh
+        # group id on every repeat.
+        sel_gids = {b.group for b in self._selected}
+        if len(sel_gids) == 1 and None not in sel_gids:
+            gid = next(iter(sel_gids))
+            if self._selected == {b for b in self._boxes if b.group == gid}:
+                return
+        self._push_undo()
+        gid = self._next_gid
+        self._next_gid += 1
+        guid = uuid.uuid4().hex
         for b in self._selected:
-            r = b.bounds_screen(1.0)
-            rect = r if rect is None else rect.united(r)
-        return (rect.x(), rect.y(), rect.width(), rect.height())
+            b.group = gid
+            b.group_uid = guid
+        self.boxes_changed.emit()
+        self.update()
+
+    def ungroup_selected(self):
+        """Remove group membership from selected boxes."""
+        if not any(b.group is not None for b in self._selected):
+            return
+        self._push_undo()
+        for b in self._selected:
+            b.group = None
+            b.group_uid = None
+        self.boxes_changed.emit()
+        self.update()
+
+    def select_all(self):
+        self._selected = set(self._boxes)
+        self.update()
+
+    def select_region(self, box_id: Optional[str] = None,
+                      group_uid: Optional[str] = None):
+        """Select the box / group backing a specific card (Browse → edit)."""
+        if box_id is not None:
+            self._selected = {b for b in self._boxes if b.id == box_id}
+        elif group_uid is not None:
+            self._selected = {b for b in self._boxes if b.group_uid == group_uid}
+        self.update()
+
+    def selection_count(self) -> int:
+        return len(self._selected)
+
+    def arm_scan(self, on: bool = True):
+        """Wait for one region to be dragged out, for the Detect button.
+
+        While armed the canvas does nothing else — no drawing, no selecting,
+        no moving a box out from under the drag — because the whole point is
+        that the next drag says where to look and nothing else.
+        """
+        self._scan_armed = bool(on)
+        self._scanning = False
+        self._drag_start = None
+        self._drag_current = None
+        self._update_cursor()
+        self.update()
+
+    def scan_armed(self) -> bool:
+        return self._scan_armed
+
+    def _cancel_scan(self):
+        was = self._scan_armed
+        self._scan_armed = False
+        self._scanning = False
+        self._drag_start = None
+        self._drag_current = None
+        self._update_cursor()
+        self.update()
+        if was:
+            self.scan_cancelled.emit()
 
     def replace_boxes(self, remove_ids: set, dicts: list[dict],
                       select: bool = False):
@@ -571,12 +702,6 @@ class OcclusionCanvas(QWidget):
         self._selected = set(added) if (added and select) else set()
         self.boxes_changed.emit()
         self.update()
-
-    def box_ids(self) -> set:
-        return {b.id for b in self._boxes}
-
-    def selected_ids(self) -> set:
-        return {b.id for b in self._selected}
 
     def set_mode_selected(self, mode: Optional[str]):
         """Occlusion-mode override for the selected region(s).
@@ -851,6 +976,28 @@ class OcclusionCanvas(QWidget):
             self._paint_shape(p, tmp, r, self._ungrouped_fill,
                               self._ungrouped_border, 1.5)
 
+        # the region being dragged out for Detect: everything outside it is
+        # dimmed, so what is about to be scanned is unmistakable
+        if self._scanning:
+            band = self._band_rect()
+            if band is not None:
+                whole = self.rect()
+                for part in (QRect(whole.left(), whole.top(),
+                                   whole.width(), band.top() - whole.top()),
+                             QRect(whole.left(), band.bottom() + 1,
+                                   whole.width(), whole.bottom() - band.bottom()),
+                             QRect(whole.left(), band.top(),
+                                   band.left() - whole.left(), band.height()),
+                             QRect(band.right() + 1, band.top(),
+                                   whole.right() - band.right(), band.height())):
+                    if part.width() > 0 and part.height() > 0:
+                        p.fillRect(part, _SCAN_SHADE)
+                pen = QPen(_SCAN_BORDER, 2)
+                pen.setStyle(Qt.PenStyle.DashLine)
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(band)
+
         # rubber-band marquee (select tool)
         if self._banding:
             band = self._band_rect()
@@ -997,6 +1144,14 @@ class OcclusionCanvas(QWidget):
         spos = event.pos()
         ipos = self._to_img(spos)
         shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+
+        if self._scan_armed:
+            self._scanning = True
+            self._drag_start = ipos
+            self._drag_current = ipos
+            self.update()
+            return
+
         self._press_spos = spos
         self._drag_started = False
         self._shift_press_box = None
@@ -1057,6 +1212,10 @@ class OcclusionCanvas(QWidget):
         self.update()
 
     def mouseMoveEvent(self, event):
+        if self._scanning:
+            self._drag_current = self._to_img(event.pos())
+            self.update()
+            return
         spos = event.pos()
         ipos = self._to_img(spos)
         shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
@@ -1118,6 +1277,12 @@ class OcclusionCanvas(QWidget):
             self.update()
             return
 
+        # while armed for Detect there is nothing to hover: no handles, no
+        # boxes to grab, just the region waiting to be dragged out
+        if self._scan_armed:
+            self._update_cursor()
+            return
+
         # cursor hints — edge resize and rotation are hover-only, so the
         # cursor is the only thing that announces them
         box, corner = self._handle_at(spos)
@@ -1136,9 +1301,7 @@ class OcclusionCanvas(QWidget):
             if box.contains_screen(spos.x(), spos.y(), self._disp):
                 self.setCursor(QCursor(Qt.CursorShape.SizeAllCursor))
                 return
-        self.setCursor(QCursor(
-            Qt.CursorShape.CrossCursor if self._tool == "draw"
-            else Qt.CursorShape.ArrowCursor))
+        self._update_cursor()
 
     def _commit_drag(self):
         """Push the pre-drag snapshot onto undo, unless nothing changed."""
@@ -1186,6 +1349,26 @@ class OcclusionCanvas(QWidget):
             self._commit_drag()
             self.boxes_changed.emit()
             self.update()
+            return
+
+        if self._scanning:
+            start, cur = self._drag_start, self._drag_current
+            self._scanning = False
+            self._scan_armed = False
+            self._drag_start = None
+            self._drag_current = None
+            self._update_cursor()
+            self.update()
+            if start is None or cur is None:
+                self.scan_cancelled.emit()
+                return
+            x, y = min(start.x(), cur.x()), min(start.y(), cur.y())
+            w, h = abs(cur.x() - start.x()), abs(cur.y() - start.y())
+            # a click rather than a drag says nothing about where to look
+            if w < 8 or h < 8:
+                self.scan_cancelled.emit()
+                return
+            self.scan_region.emit(x, y, w, h)
             return
 
         if self._banding:
@@ -1320,6 +1503,9 @@ class OcclusionCanvas(QWidget):
             return
 
         if key == Qt.Key.Key_Escape:
+            if self._scan_armed:
+                self._cancel_scan()
+                return
             if self._selected:
                 self._selected = set()
                 self.update()

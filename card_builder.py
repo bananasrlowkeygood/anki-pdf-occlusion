@@ -885,7 +885,7 @@ def create_occlusion_notes(
 
             new_note_map[key] = note.id
 
-    # Pages not part of this run (skipped, or all boxes removed) keep their
+    # Pages not part of this run (no boxes left on them) keep their
     # existing card links and slide images untouched — only a region missing
     # from a page we actually processed counts as stale.
     processed = {page_idx for page_idx, _, _ in pages}
