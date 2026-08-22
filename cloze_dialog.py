@@ -62,6 +62,12 @@ QPushButton#clozeAdd {{
 }}
 QPushButton#clozeAdd:hover {{ background: #75619b; }}
 QPushButton#clozeAdd:pressed {{ background: #67548c; }}
+QPushButton#clozeSlideText {{
+    background: transparent; border: none; padding: 0 2px;
+    color: {_PURPLE}; font-size: 11px; font-weight: bold;
+}}
+QPushButton#clozeSlideText:hover {{ color: #9b86c4; }}
+QPushButton#clozeSlideText:pressed {{ color: #67548c; }}
 """
 
 _CHIP_QSS = f"""
@@ -271,7 +277,24 @@ class ClozeComposer(QWidget):
         hint.setToolTip(
             f"{_native('Ctrl+Shift+C')} wraps the selection in a new cloze\n"
             f"{_native('Ctrl+Alt+Shift+C')} reuses the number already used")
-        root.addWidget(hint)
+        # The button sits on the hint's line rather than getting a row of its
+        # own: it belongs to the editor above, and the panel has no height to
+        # spare before the Add button starts crowding Create All Cards.
+        self._slide_text_btn = QPushButton("Slide Text")
+        self._slide_text_btn.setObjectName("clozeSlideText")
+        self._slide_text_btn.setAutoDefault(False)
+        self._slide_text_btn.setDefault(False)
+        self._slide_text_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._slide_text_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._slide_text_btn.setToolTip(
+            "Paste the text printed on this slide into the field")
+        self._slide_text_btn.clicked.connect(self._pull_slide_text)
+        hint_row = QHBoxLayout()
+        hint_row.setContentsMargins(0, 0, 0, 0)
+        hint_row.addWidget(hint)
+        hint_row.addStretch()
+        hint_row.addWidget(self._slide_text_btn)
+        root.addLayout(hint_row)
 
         self._extra = QLineEdit()
         self._extra.setPlaceholderText("Extra")
@@ -391,6 +414,27 @@ class ClozeComposer(QWidget):
         if same:
             n = max(1, n - 1)
         cur.insertText("{{c%d::%s}}" % (n, sel))
+        self._text.setTextCursor(cur)
+        self._text.setFocus()
+
+    # -------------------------------------------------------- slide text
+
+    def _pull_slide_text(self):
+        """Drop the slide's own text into the editor, to wrap rather than
+        retype. Appended, never overwritten — the field may already hold a
+        card being rewritten."""
+        info = self._slide_info()
+        text = self._owner.cloze_slide_text(info["page"] if info else None)
+        if not text:
+            self._say("No text to take from this slide.", ok=False)
+            return
+        existing = self._text.toPlainText()
+        cur = self._text.textCursor()
+        cur.movePosition(QTextCursor.MoveOperation.End)
+        if existing.strip():
+            cur.insertText(("" if existing.endswith("\n") else "\n") + text)
+        else:
+            cur.insertText(text)
         self._text.setTextCursor(cur)
         self._text.setFocus()
 

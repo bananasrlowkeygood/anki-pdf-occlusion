@@ -185,3 +185,48 @@ def _merge_text_rects(rects: list[list[float]]) -> list[tuple]:
         padded.append((max(0.0, x - pad), max(0.0, y - pad),
                        w + pad * 2, h + pad * 2))
     return padded
+
+
+# ------------------------------------------------------------ text extraction
+
+def get_page_text(path: str, page_index: int) -> str:
+    """The page's text as it reads, for pasting into a cloze.
+
+    pdfium hands back one long run with hard line breaks where the layout
+    had them, plus the odd stray blank line; those are tidied here so the
+    result drops straight into a text field. Empty string if the page has
+    no extractable text (e.g. a scanned image).
+    """
+    pdfium = _import_pdfium()
+    doc = pdfium.PdfDocument(path)
+    try:
+        page = doc[page_index]
+        try:
+            textpage = page.get_textpage()
+            try:
+                raw = textpage.get_text_range()
+            finally:
+                textpage.close()
+        finally:
+            page.close()
+    finally:
+        doc.close()
+    return _tidy_page_text(raw)
+
+
+def _tidy_page_text(raw: str) -> str:
+    """Normalise line endings, drop blank lines, and rejoin split words."""
+    lines = []
+    for line in (raw or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = line.replace("\u00a0", " ").strip()
+        if line:
+            lines.append(line)
+
+    out: list[str] = []
+    for line in lines:
+        # a word broken across a line by a soft hyphen belongs back together
+        if out and out[-1].endswith("-") and not out[-1].endswith("--"):
+            out[-1] = out[-1][:-1] + line
+        else:
+            out.append(line)
+    return "\n".join(out)

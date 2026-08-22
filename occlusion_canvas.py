@@ -772,13 +772,6 @@ class OcclusionCanvas(QWidget):
 
             self._paint_shape(p, box, r, fill, border, 2.0 if sel else 1.5)
 
-            # group label
-            if box.group is not None:
-                p.setPen(QColor(255, 255, 255, 220))
-                p.drawText(r.adjusted(3, 2, -3, -2),
-                           Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
-                           f"G{box.group + 1}")
-
             # mode-override badge (bottom-left) — only when this region
             # deviates from the slide/PDF default
             if box.mode is not None and r.height() >= 16 and r.width() >= 26:

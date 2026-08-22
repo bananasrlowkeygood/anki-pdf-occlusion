@@ -17,7 +17,7 @@ from .occlusion_canvas import OcclusionCanvas
 from .card_builder import (ensure_note_type, create_occlusion_notes,
                            create_cloze_notes, cloze_note_type,
                            cloze_card_count)
-from .pdf_renderer import render_pdf, get_text_line_rects
+from .pdf_renderer import render_pdf, get_text_line_rects, get_page_text
 
 
 _ZOOM_STEPS = [0.25, 0.33, 0.5, 0.67, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
@@ -492,7 +492,7 @@ class PDFOcclusionDialog(QDialog):
         self._notes_pdf_menu.clear()
         path = self._notes_pdf()
         self._notes_pdf_menu.addAction(
-            "Choose PDF…" if not path else "Replace…", self._choose_notes_pdf)
+            "Choose PDF…" if not path else "Replace", self._choose_notes_pdf)
         act = self._notes_pdf_menu.addAction(
             "Open", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(path)))
         act.setEnabled(bool(path) and os.path.exists(path))
@@ -504,7 +504,7 @@ class PDFOcclusionDialog(QDialog):
         self._notes_pdf_btn.setEnabled(bool(self._docs))
         path = self._notes_pdf()
         if not path:
-            self._notes_pdf_btn.setText("Notes PDF…")
+            self._notes_pdf_btn.setText("Notes PDF")
             self._notes_pdf_btn.setToolTip(
                 "Attach a lecture-notes PDF · the cards get a Notes button "
                 "that opens it"
@@ -1113,6 +1113,24 @@ class PDFOcclusionDialog(QDialog):
         if not 0 <= idx < len(self._pages):
             idx = self._page_index
         return {"page": idx, "label": self._slide_label_for(idx)}
+
+    def cloze_slide_text(self, page: Optional[int] = None) -> str:
+        """The text printed on a slide, for the composer's Slide Text button.
+
+        Empty string when the slide has none to give (a scanned image, or a
+        PDF pdfium cannot read text out of) — the composer says so."""
+        if not self._pages:
+            return ""
+        idx = self._page_index if page is None else page
+        if not 0 <= idx < len(self._pages):
+            idx = self._page_index
+        doc = self._doc_for_page(idx)
+        if not doc:
+            return ""
+        try:
+            return get_page_text(doc["path"], idx - doc["start"])
+        except Exception:
+            return ""
 
     def _slide_label_for(self, idx: int) -> str:
         doc = self._doc_for_page(idx)
