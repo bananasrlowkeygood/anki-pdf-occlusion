@@ -931,7 +931,9 @@ class PDFOcclusionDialog(QDialog):
             return
         self._canvas.arm_scan(True)
         self._detect_btn.setChecked(True)
-        self._say_detect("Drag over the part to scan · Esc cancels")
+        # No prompt: the sunk button, the crosshair and the dimming that
+        # follows the drag already say what is going on.
+        self._say_detect("")
 
     def _on_scan_cancelled(self):
         self._detect_btn.setChecked(False)
