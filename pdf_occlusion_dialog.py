@@ -7,13 +7,15 @@ from aqt.theme import theme_manager
 from aqt.qt import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QToolButton, QLabel,
     QLineEdit, QComboBox, QFileDialog, QScrollArea, QShortcut, QKeySequence,
-    Qt, QRect, QImage, QProgressDialog, QMenu, QDesktopServices, QUrl, QTimer,
+    Qt, QRect, QImage, QPainter, QInputDialog, QProgressDialog, QMenu,
+    QDesktopServices, QUrl, QTimer,
 )
 from aqt.utils import askUser, showInfo, showWarning
 
 from . import session_store
 from .cloze_dialog import ClozeColumn, ClozeComposer, fly_to_chip
-from .occlusion_canvas import OcclusionCanvas
+from .occlusion_canvas import (OcclusionCanvas, annotation_rect,
+                               draw_annotation)
 from .card_builder import (ensure_note_type, create_occlusion_notes,
                            create_cloze_notes, cloze_note_type,
                            cloze_card_count)
@@ -132,6 +134,11 @@ class PDFOcclusionDialog(QDialog):
         self._page_index: int = 0
         self._boxes: dict[int, list[dict]] = {}
         self._page_modes: dict[int, str] = {}   # global page idx -> "ao"/"oa"
+        # Text written onto a slide: part of the picture, not a card. It goes
+        # onto the image the cards are cut from, so a box can occlude it like
+        # anything the slide already had printed on it.
+        self._annots: dict[int, list] = {}
+        self._page_cache: dict[int, QImage] = {}   # slides with text drawn in
         # Cloze: the composer is a panel to the right of the slide, the
         # cards written from it are chips to the left, per slide. Like the
         # boxes, they are only records until Create All Cards runs —
@@ -277,6 +284,15 @@ class PDFOcclusionDialog(QDialog):
         self._select_btn.setToolTip("Drag to select boxes (V)")
         self._select_btn.clicked.connect(lambda: self._set_tool("select"))
 
+        self._text_btn = QPushButton("Text")
+        self._text_btn.setCheckable(True)
+        self._text_btn.setToolTip(
+            "Write text onto the slide (A)\n\n"
+            "Drag out a box and type. The text becomes part of the slide, "
+            "not a card — occlude it like anything else printed there.\n"
+            "Click text to edit it; clear the text to remove it.")
+        self._text_btn.clicked.connect(lambda: self._set_tool("text"))
+
         self._detect_btn = QPushButton("Detect")
         self._detect_btn.setCheckable(True)
         self._detect_btn.setToolTip(
@@ -303,6 +319,7 @@ class PDFOcclusionDialog(QDialog):
 
         row3.addWidget(self._draw_btn)
         row3.addWidget(self._select_btn)
+        row3.addWidget(self._text_btn)
         row3.addSpacing(10)
         row3.addWidget(self._detect_btn)
         row3.addWidget(self._cloze_btn)
@@ -323,6 +340,8 @@ class PDFOcclusionDialog(QDialog):
         self._canvas.zoom_gesture.connect(self._on_zoom_gesture)
         self._canvas.scan_region.connect(self._on_scan_region)
         self._canvas.scan_cancelled.connect(self._on_scan_cancelled)
+        self._canvas.text_region.connect(self._on_text_region)
+        self._canvas.text_activated.connect(self._on_text_activated)
         self._scroll = QScrollArea()
         self._scroll.setWidget(self._canvas)
         self._scroll.setWidgetResizable(False)
@@ -399,8 +418,8 @@ class PDFOcclusionDialog(QDialog):
         # Open PDF / notes-PDF buttons, which do need focus to be usable — the
         # first three because you type into them, the last two because they
         # have no shortcut and would otherwise be mouse-only.
-        for w in (self._draw_btn, self._select_btn, self._detect_btn,
-                  self._cloze_btn,
+        for w in (self._draw_btn, self._select_btn, self._text_btn,
+                  self._detect_btn, self._cloze_btn,
                   self._zoom_out_btn, self._zoom_in_btn, self._fit_btn,
                   self._prev_btn, self._next_btn):
             w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -426,6 +445,7 @@ class PDFOcclusionDialog(QDialog):
         QShortcut(QKeySequence(Qt.Key.Key_PageDown), self, self._next_page)
         QShortcut(QKeySequence("D"), self, lambda: self._set_tool("draw"))
         QShortcut(QKeySequence("V"), self, lambda: self._set_tool("select"))
+        QShortcut(QKeySequence("A"), self, lambda: self._set_tool("text"))
         QShortcut(QKeySequence("T"), self, self._arm_detect)
         # V for Vasu, who asked for the cloze composer. Plain V is already
         # the Select tool, so it takes the modifiers.
@@ -461,6 +481,7 @@ class PDFOcclusionDialog(QDialog):
         self._canvas.set_tool(tool)
         self._draw_btn.setChecked(tool == "draw")
         self._select_btn.setChecked(tool == "select")
+        self._text_btn.setChecked(tool == "text")
 
     def _default_mode(self) -> str:
         """PDF-wide occlusion mode — the config value; slides override it."""
@@ -640,6 +661,8 @@ class PDFOcclusionDialog(QDialog):
         self._page_index = 0
         self._boxes.clear()
         self._page_modes.clear()
+        self._annots.clear()
+        self._page_cache.clear()
 
         # the first recognition on a machine loads macOS's models and takes
         # ~30s; get that out of the way now rather than under a Detect click
@@ -718,6 +741,16 @@ class PDFOcclusionDialog(QDialog):
                         restored.append(entry)
                     self._cloze_cards[page] = restored
 
+            for k, a in (s.get("annotations") or {}).items():
+                try:
+                    local = int(k)
+                except ValueError:
+                    continue
+                if 0 <= local < doc["count"] and a:
+                    for entry in a:
+                        entry.setdefault("id", uuid.uuid4().hex)
+                    self._annots[doc["start"] + local] = a
+
             for k, m in (s.get("page_modes") or {}).items():
                 try:
                     local = int(k)
@@ -753,7 +786,13 @@ class PDFOcclusionDialog(QDialog):
                 for i in range(start, start + count)
                 if self._cloze_cards.get(i)
             }
-            if (not boxes and not cloze_cards and not self._cloze_stale
+            annots = {
+                str(i - start): self._annots[i]
+                for i in range(start, start + count)
+                if self._annots.get(i)
+            }
+            if (not boxes and not cloze_cards and not annots
+                    and not self._cloze_stale
                     and not doc.get("note_map") and not doc.get("notes_pdf")):
                 session_store.delete(doc["path"])
                 continue
@@ -764,6 +803,7 @@ class PDFOcclusionDialog(QDialog):
                 "page_modes": {
                     str(i - start): m for i, m in self._page_modes.items()
                     if start <= i < start + count},
+                "annotations": annots,
                 "note_map": doc.get("note_map", {}),
                 "image_map": doc.get("image_map", {}),
                 "cloze_cards": cloze_cards,
@@ -861,6 +901,7 @@ class PDFOcclusionDialog(QDialog):
             self._boxes.get(self._page_index, []),
             render_scale=self._render_scale,
         )
+        self._canvas.set_annotations(self._annots.get(self._page_index, []))
         doc = self._doc_for_page(self._page_index)
         if doc and self._lecture_edit.text().strip() != doc["lecture"]:
             self._lecture_edit.blockSignals(True)
@@ -915,6 +956,72 @@ class PDFOcclusionDialog(QDialog):
 
     def _on_boxes_changed(self):
         self._refresh_count()
+
+    # ------------------------------------------------------------ slide text --
+    #
+    # Text written onto the slide itself. Not a card and not a note: it joins
+    # the picture, so it lands on every card cut from this slide and a box
+    # can occlude it exactly like something the lecturer had printed there.
+
+    def _ask_text(self, current: str = "") -> Optional[str]:
+        text, ok = QInputDialog.getMultiLineText(
+            self, "Text on Slide",
+            "Written onto the slide itself — occlude it like anything else "
+            "printed there:",
+            current)
+        return text if ok else None
+
+    def _on_text_region(self, x: float, y: float, w: float, h: float):
+        text = self._ask_text()
+        if not text or not text.strip():
+            return
+        self._annots.setdefault(self._page_index, []).append({
+            "id": uuid.uuid4().hex, "x": int(x), "y": int(y),
+            "w": int(w), "h": int(h), "text": text.strip(),
+        })
+        self._annots_changed()
+
+    def _on_text_activated(self, annot_id: str):
+        here = self._annots.get(self._page_index, [])
+        found = next((a for a in here if a["id"] == annot_id), None)
+        if found is None:
+            return
+        text = self._ask_text(found.get("text", ""))
+        if text is None:
+            return
+        if text.strip():
+            found["text"] = text.strip()
+        else:
+            # emptied — that is how you take one back off
+            here.remove(found)
+        self._annots_changed()
+
+    def _annots_changed(self):
+        here = self._annots.get(self._page_index, [])
+        if not here:
+            self._annots.pop(self._page_index, None)
+        self._canvas.set_annotations(here)
+        self._page_cache.pop(self._page_index, None)
+
+    def _page_image(self, idx: int) -> QImage:
+        """The slide as it actually looks — its own pixels plus any text
+        written onto it. This, not the raw render, is what gets occluded,
+        recognised and written onto cards."""
+        annots = self._annots.get(idx)
+        if not annots:
+            return self._pages[idx]
+        cached = self._page_cache.get(idx)
+        if cached is not None:
+            return cached
+        img = QImage(self._pages[idx])
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        for a in annots:
+            draw_annotation(p, a, annotation_rect(a))
+        p.end()
+        self._page_cache[idx] = img
+        return img
 
     # ------------------------------------------------------------ detection --
     #
@@ -1019,7 +1126,7 @@ class PDFOcclusionDialog(QDialog):
         far side of the page that the drag deliberately left out.
         """
         x, y, w, h = (int(v) for v in region)
-        page = self._pages[self._page_index]
+        page = self._page_image(self._page_index)
         crop = page.copy(QRect(max(0, x), max(0, y),
                                min(int(w), page.width()), min(int(h), page.height())))
         return [(rx + max(0, x), ry + max(0, y), rw, rh)
@@ -1086,6 +1193,7 @@ class PDFOcclusionDialog(QDialog):
         self._zoom_in_btn.setEnabled(has)
         self._zoom_out_btn.setEnabled(has)
         self._fit_btn.setEnabled(has)
+        self._text_btn.setEnabled(has)
         self._detect_btn.setEnabled(has)
         self._cloze_btn.setEnabled(has)
         self._page_mode_combo.setEnabled(has)
@@ -1255,7 +1363,7 @@ class PDFOcclusionDialog(QDialog):
         for doc in self._docs:
             start, count = doc["start"], doc["count"]
             to_create = [
-                (i - start, self._pages[i], self._boxes[i])
+                (i - start, self._page_image(i), self._boxes[i])
                 for i in range(start, start + count)
                 if self._boxes.get(i)
             ]
@@ -1355,7 +1463,7 @@ class PDFOcclusionDialog(QDialog):
 
                 cres = create_cloze_notes(
                     mw.col, deck_id, cloze_type, cloze,
-                    page_images={c["page"]: self._pages[start + c["page"]]
+                    page_images={c["page"]: self._page_image(start + c["page"])
                                  for c in cloze},
                     image_map=doc.get("image_map"),
                     caption_for=caption_for,

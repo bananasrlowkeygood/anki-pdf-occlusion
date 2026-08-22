@@ -48,7 +48,7 @@ from typing import Optional
 from aqt.qt import (
     QWidget, QPainter, QPen, QColor, QRect, QPoint, QPointF,
     QPixmap, QImage, Qt, QCursor, QMenu, QAction, QKeyEvent,
-    QInputDialog, QEvent, QPolygonF, pyqtSignal,
+    QInputDialog, QEvent, QPolygonF, QFont, QFontMetrics, pyqtSignal,
 )
 
 # ------------------------------------------------------------------ colours
@@ -112,6 +112,51 @@ _HANDLE_DIR = {"l": 180, "r": 0, "t": -90, "b": 90,
                "tl": -135, "tr": -45, "bl": 135, "br": 45}
 
 _MODE_LABELS = {"ao": "AO", "oa": "OA"}
+
+
+_ANNOT_BG   = QColor(255, 255, 255)
+_ANNOT_FG   = QColor(20, 20, 20)
+_ANNOT_HINT = QColor(131, 110, 170, 150)   # outline, only while the Text tool is up
+
+
+def annotation_rect(a: dict, zoom: float = 1.0) -> QRect:
+    return QRect(int(a["x"] * zoom), int(a["y"] * zoom),
+                 max(1, int(a["w"] * zoom)), max(1, int(a["h"] * zoom)))
+
+
+def draw_annotation(p: QPainter, a: dict, r: QRect):
+    """Paint one text annotation into `r`.
+
+    Lives here rather than in the canvas so the slide written onto a card
+    and the slide on screen are drawn by the same code — an annotation that
+    fits while you type it must still fit on the card.
+
+    The text is sized to the box: it starts at something that would fill the
+    height and steps down until it fits, so the box is the control and there
+    is no font size to fiddle with.
+    """
+    text = (a.get("text") or "").strip()
+    p.save()
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(_ANNOT_BG)
+    p.drawRect(r)
+    if text:
+        flags = (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+                 | Qt.TextFlag.TextWordWrap)
+        inner = r.adjusted(4, 2, -4, -2)
+        font = QFont(p.font())
+        size = max(6, int(inner.height() * 0.8))
+        while size > 6:
+            font.setPixelSize(size)
+            need = QFontMetrics(font).boundingRect(inner, int(flags), text)
+            if need.height() <= inner.height() and need.width() <= inner.width():
+                break
+            size -= 1
+        font.setPixelSize(max(6, size))
+        p.setFont(font)
+        p.setPen(_ANNOT_FG)
+        p.drawText(inner, int(flags), text)
+    p.restore()
 
 
 def _group_color(gid: int, selected: bool, alpha: int = 160) -> QColor:
@@ -382,6 +427,9 @@ class OcclusionCanvas(QWidget):
     # a region was dragged out for the Detect button: x, y, w, h in image px
     scan_region = pyqtSignal(float, float, float, float)
     scan_cancelled = pyqtSignal()
+    # Text tool: a region was dragged out for new text, or existing text clicked
+    text_region = pyqtSignal(float, float, float, float)
+    text_activated = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -412,6 +460,8 @@ class OcclusionCanvas(QWidget):
         # Detect arms the canvas for one region drag and then stands down.
         self._scan_armed = False
         self._scanning = False
+        self._texting = False           # dragging out a new text box
+        self._annots: list = []         # text written onto the slide itself
         self._draw_shift = False        # Shift held when the draw started
         self._drag_start: Optional[QPointF] = None
         self._drag_current: Optional[QPointF] = None
@@ -448,16 +498,17 @@ class OcclusionCanvas(QWidget):
             int(r * 0.6), int(g * 0.6), int(b * 0.6), 225)
 
     def set_tool(self, tool: str):
-        """Active tool: "draw" (drag draws boxes) or "select" (drag marquee-selects)."""
-        if tool in ("draw", "select"):
+        """Active tool: "draw" (boxes), "select" (marquee), "text" (annotations)."""
+        if tool in ("draw", "select", "text"):
             self._tool = tool
             self._update_cursor()
+            self.update()   # the Text tool outlines what it can edit
 
     def _update_cursor(self):
         """The resting cursor for the current mode."""
         self.setCursor(QCursor(
             Qt.CursorShape.CrossCursor
-            if (self._scan_armed or self._tool == "draw")
+            if (self._scan_armed or self._tool in ("draw", "text"))
             else Qt.CursorShape.ArrowCursor))
 
     def tool(self) -> str:
@@ -484,6 +535,13 @@ class OcclusionCanvas(QWidget):
 
     def get_boxes(self) -> list[dict]:
         return [b.to_dict() for b in self._boxes]
+
+    def set_annotations(self, annots: list):
+        """Text written onto this slide. Not boxes — these are part of the
+        picture, and an occlusion box can be drawn over one like anything
+        else printed on the slide."""
+        self._annots = list(annots or [])
+        self.update()
 
     def set_zoom(self, zoom: float):
         self._zoom = max(0.1, min(4.0, zoom))
@@ -845,6 +903,12 @@ class OcclusionCanvas(QWidget):
             out |= self._group_members(b)
         return out
 
+    def _annot_at(self, spos: QPoint) -> Optional[dict]:
+        for a in reversed(self._annots):
+            if annotation_rect(a, self._disp).contains(spos):
+                return a
+        return None
+
     def _band_rect(self) -> Optional[QRect]:
         if not (self._drag_start and self._drag_current):
             return None
@@ -903,6 +967,20 @@ class OcclusionCanvas(QWidget):
                       int(self._orig_h * self._disp)),
                 self._pixmap,
             )
+
+        # Text written onto the slide. Painted before the boxes, because it
+        # is part of the picture: a mask drawn over one has to cover it.
+        for a in self._annots:
+            r = annotation_rect(a, self._disp)
+            draw_annotation(p, a, r)
+            if self._tool == "text":
+                # only while the tool is up, so they read as slide content
+                # the rest of the time
+                pen = QPen(_ANNOT_HINT, 1)
+                pen.setStyle(Qt.PenStyle.DashLine)
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(r)
 
         font = p.font()
         font.setPointSize(8)
@@ -975,6 +1053,17 @@ class OcclusionCanvas(QWidget):
             r = tmp.screen_rect(self._disp)
             self._paint_shape(p, tmp, r, self._ungrouped_fill,
                               self._ungrouped_border, 1.5)
+
+        # the text box being dragged out
+        if self._texting:
+            band = self._band_rect()
+            if band is not None:
+                p.fillRect(band, _ANNOT_BG)
+                pen = QPen(_ANNOT_HINT, 1)
+                pen.setStyle(Qt.PenStyle.DashLine)
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(band)
 
         # the region being dragged out for Detect: everything outside it is
         # dimmed, so what is about to be scanned is unmistakable
@@ -1152,6 +1241,17 @@ class OcclusionCanvas(QWidget):
             self.update()
             return
 
+        if self._tool == "text":
+            hit = self._annot_at(spos)
+            if hit is not None:
+                self.text_activated.emit(hit["id"])
+                return
+            self._texting = True
+            self._drag_start = ipos
+            self._drag_current = ipos
+            self.update()
+            return
+
         self._press_spos = spos
         self._drag_started = False
         self._shift_press_box = None
@@ -1212,6 +1312,10 @@ class OcclusionCanvas(QWidget):
         self.update()
 
     def mouseMoveEvent(self, event):
+        if self._texting:
+            self._drag_current = self._to_img(event.pos())
+            self.update()
+            return
         if self._scanning:
             self._drag_current = self._to_img(event.pos())
             self.update()
@@ -1349,6 +1453,20 @@ class OcclusionCanvas(QWidget):
             self._commit_drag()
             self.boxes_changed.emit()
             self.update()
+            return
+
+        if self._texting:
+            start, cur = self._drag_start, self._drag_current
+            self._texting = False
+            self._drag_start = None
+            self._drag_current = None
+            self.update()
+            if start is None or cur is None:
+                return
+            x, y = min(start.x(), cur.x()), min(start.y(), cur.y())
+            w, h = abs(cur.x() - start.x()), abs(cur.y() - start.y())
+            if w >= 12 and h >= 10:
+                self.text_region.emit(x, y, w, h)
             return
 
         if self._scanning:
