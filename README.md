@@ -48,7 +48,9 @@
 
 - **Draw** (`D`) — drag on empty space to draw a box; hold `Shift` while drawing and the new box joins the selection's group, so a multi-part card can be sketched in one pass
 - **Select** (`V`) — drag on empty space to marquee-select boxes; `Shift` adds to the selection
-- **Text** (`A`) — drag out a box and type to **write onto the slide itself**. This is not a card and not a note: the text joins the picture, so it appears on every card cut from that slide and an occlusion box can hide it exactly like something the lecturer had printed there. Click text to edit it; clear the text to remove it. Saved with the session.
+- **Text** (`A`) — two things, depending on what you click:
+  - **Drag on the slide** to *write onto the slide itself*. Not a card and not a note: the text joins the picture, so it appears on every card cut from that slide and an occlusion box can hide it exactly like something the lecturer had printed there. Click text to edit it; clear the text to remove it. Saved with the session.
+  - **Click an occlusion box** to *label the mask* — a word or two shown across it in small white bold, and **only while that box is the one being asked about**. It prompts the kind of answer wanted ("enzyme", "artery") without giving it away, and it's gone the moment the mask lifts. Boxes too small to show it legibly don't get one.
 - **Detect** (`T`) — click it, then **drag over the part of the slide to scan**; everything outside the region dims so it's clear what's about to be boxed. `Esc` cancels. It never runs on the whole slide: a slide usually has one table worth boxing plus a title, a footer and a page number that aren't.
   - A **ruled table** in the region is boxed **cell by cell**, read from the table's own borders in the PDF. Merged cells come out as one box.
   - Anything else is boxed **word by word** — a card that hides a whole line asks you to recall a sentence, which is a harder and different question than the one the slide is teaching.

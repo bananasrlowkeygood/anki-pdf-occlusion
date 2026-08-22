@@ -479,7 +479,7 @@ def _split_regions(boxes: list[dict]) -> list[list[dict]]:
 # Keep this string byte-identical to what add_viewbox() produces, or
 # every existing note will look "changed" on the next run and be rewritten.
 def _svg(W: int, H: int, rects: list[str]) -> bytes:
-    body = "\n  ".join(rects)
+    body = "\n  ".join(r for r in rects if r)
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}"'
         f' viewBox="0 0 {W} {H}" preserveAspectRatio="none">\n'
@@ -496,6 +496,62 @@ def _color_str(color: tuple) -> str:
 # highlight_color). The highlight stroke is derived (darker highlight).
 _DEFAULT_MASK_COLOR = (120, 120, 120)
 _DEFAULT_HIGHLIGHT_COLOR = (131, 110, 170)
+
+
+# ------------------------------------------------------------- mask labels
+#
+# A box can carry a label — a word or two written across the mask itself,
+# to say what kind of answer is wanted ("enzyme", "artery") without giving
+# it away. It is drawn only on the question, and only on the region being
+# tested: the other masks stay blank, and on the answer the mask is gone
+# along with its label.
+#
+# Sized as a fraction of the slide rather than of the box, so every label
+# on every card comes out the same size, and a box only gets one if it is
+# big enough to hold it legibly.
+
+_LABEL_FRAC = 0.024     # of image height
+_LABEL_MIN_W = 2.6      # the box must be this many font-sizes wide...
+_LABEL_MIN_H = 1.6      # ...and this many tall
+
+
+def label_font_size(img_h: int) -> float:
+    return max(8.0, img_h * _LABEL_FRAC)
+
+
+def label_fits(w: float, h: float, img_h: int) -> bool:
+    """Is this box big enough to carry a label people can actually read?"""
+    size = label_font_size(img_h)
+    return w >= size * _LABEL_MIN_W and h >= size * _LABEL_MIN_H
+
+
+def _label_shape(region: list, img_h: int) -> str:
+    """The label for one card region, centred on it. "" if there is none."""
+    text = next((b.get("label", "").strip() for b in region
+                 if (b.get("label") or "").strip()), "")
+    if not text:
+        return ""
+    x0 = min(b["x"] for b in region)
+    y0 = min(b["y"] for b in region)
+    x1 = max(b["x"] + b["w"] for b in region)
+    y1 = max(b["y"] + b["h"] for b in region)
+    if not label_fits(x1 - x0, y1 - y0, img_h):
+        return ""
+    size = label_font_size(img_h)
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    transform = ""
+    if len(region) == 1 and float(region[0].get("angle") or 0):
+        a = float(region[0]["angle"])
+        transform = f' transform="rotate({a:g} {cx:g} {cy:g})"'
+    # No dominant-baseline: it is the kind of thing a strict renderer gets
+    # its own way about, and the mask alignment saga already taught us not
+    # to lean on those. Half an em below centre puts it right on any of them.
+    return (
+        f'<text x="{cx:g}" y="{cy + size * 0.35:g}" text-anchor="middle"'
+        f' font-size="{size:g}" font-weight="bold" fill="#ffffff"'
+        f' font-family="-apple-system, Helvetica, Arial, sans-serif"'
+        f'{transform}>{html.escape(text)}</text>'
+    )
 
 
 def _make_masks(
@@ -525,6 +581,7 @@ def _make_masks(
         # ── Front: non-active boxes opaque; active always highlighted ────────
         q_rects = [_region_shapes(r, c, opacity) for r in na_regions]
         q_rects += [_region_shapes(active, h, opacity, hs, 1.0, 3)]
+        q_rects += [_label_shape(active, H)]
 
         # ── Back: non-active stay opaque; active disappears completely ───────
         a_rects = [_region_shapes(r, c, opacity) for r in na_regions]
@@ -533,6 +590,7 @@ def _make_masks(
         # ── Front: only active opaque; others as faint outlines ──────────────
         q_rects = [_region_shapes(r, c, 0.15, c, 0.5, 2) for r in na_regions]
         q_rects += [_region_shapes(active, c, opacity, hs, 1.0, 3)]
+        q_rects += [_label_shape(active, H)]
 
         # ── Back: all boxes disappear completely (no outlines) ───────────────
         a_rects = []

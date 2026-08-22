@@ -45,6 +45,8 @@ import math
 import uuid
 from typing import Optional
 
+from .card_builder import label_fits, label_font_size
+
 from aqt.qt import (
     QWidget, QPainter, QPen, QColor, QRect, QPoint, QPointF,
     QPixmap, QImage, Qt, QCursor, QMenu, QAction, QKeyEvent,
@@ -250,13 +252,13 @@ class _Box:
     """
 
     __slots__ = ("x", "y", "w", "h", "angle", "group", "group_uid",
-                 "shape", "mode", "note", "id")
+                 "shape", "mode", "note", "label", "id")
 
     def __init__(self, x: float, y: float, w: float, h: float,
                  group: Optional[int] = None, group_uid: Optional[str] = None,
                  shape: str = "rect", mode: Optional[str] = None,
                  note: str = "", box_id: Optional[str] = None,
-                 angle: float = 0.0):
+                 angle: float = 0.0, label: str = ""):
         self.x, self.y, self.w, self.h = x, y, w, h
         self.angle = float(angle or 0.0)
         self.group = group
@@ -264,6 +266,7 @@ class _Box:
         self.shape = shape if shape in ("rect", "ellipse") else "rect"
         self.mode = mode if mode in ("ao", "oa") else None
         self.note = note or ""
+        self.label = label or ""
         self.id = box_id or uuid.uuid4().hex
 
     def norm(self) -> "_Box":
@@ -271,7 +274,8 @@ class _Box:
         if w < 0: x += w; w = -w
         if h < 0: y += h; h = -h
         return _Box(x, y, w, h, self.group, self.group_uid,
-                    self.shape, self.mode, self.note, self.id, self.angle)
+                    self.shape, self.mode, self.note, self.id, self.angle,
+                    self.label)
 
     def to_dict(self) -> dict:
         n = self.norm()
@@ -285,6 +289,11 @@ class _Box:
         # to the exact same mask SVG — no mass "updated" on the next run).
         if self.angle:
             d["angle"] = round(self.angle, 3)
+        # Same reasoning as angle: only labelled boxes carry the key, so
+        # every card made before labels existed still round-trips to the
+        # identical dict and the identical mask.
+        if self.label:
+            d["label"] = self.label
         return d
 
     @classmethod
@@ -293,7 +302,7 @@ class _Box:
                    d.get("group"), d.get("group_uid"),
                    d.get("shape", "rect"), d.get("mode"),
                    d.get("note", ""), d.get("id"),
-                   d.get("angle", 0.0))
+                   d.get("angle", 0.0), d.get("label", ""))
 
     # -- geometry ---------------------------------------------------------
 
@@ -430,6 +439,8 @@ class OcclusionCanvas(QWidget):
     # Text tool: a region was dragged out for new text, or existing text clicked
     text_region = pyqtSignal(float, float, float, float)
     text_activated = pyqtSignal(str)
+    # Text tool clicked an occlusion box: edit the label written across it
+    label_activated = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -535,6 +546,28 @@ class OcclusionCanvas(QWidget):
 
     def get_boxes(self) -> list[dict]:
         return [b.to_dict() for b in self._boxes]
+
+    def label_fits_box(self, box_id: str) -> bool:
+        """Is that box big enough to show a label? The rule is card_builder's,
+        so what you are allowed to type is exactly what will show."""
+        box = next((b for b in self._boxes if b.id == box_id), None)
+        if box is None:
+            return False
+        n = box.norm()
+        return label_fits(n.w, n.h, self._orig_h)
+
+    def box_label(self, box_id: str) -> str:
+        box = next((b for b in self._boxes if b.id == box_id), None)
+        return box.label if box else ""
+
+    def set_box_label(self, box_id: str, text: str):
+        box = next((b for b in self._boxes if b.id == box_id), None)
+        if box is None or box.label == text:
+            return
+        self._push_undo()
+        box.label = text
+        self.boxes_changed.emit()
+        self.update()
 
     def set_annotations(self, annots: list):
         """Text written onto this slide. Not boxes — these are part of the
@@ -1011,6 +1044,19 @@ class OcclusionCanvas(QWidget):
 
             self._paint_shape(p, box, r, fill, border, 2.0 if sel else 1.5)
 
+            # the label written across the mask — drawn the way the card
+            # draws it, so the canvas is showing the real thing
+            if box.label and label_fits(box.norm().w, box.norm().h,
+                                        self._orig_h):
+                lf = QFont(p.font())
+                lf.setBold(True)
+                lf.setPixelSize(max(6, int(label_font_size(self._orig_h)
+                                           * self._disp)))
+                p.setFont(lf)
+                p.setPen(QColor(255, 255, 255))
+                p.drawText(r, Qt.AlignmentFlag.AlignCenter, box.label)
+                p.setFont(font)
+
             # mode-override badge (bottom-left) — only when this region
             # deviates from the slide/PDF default
             if box.mode is not None and r.height() >= 16 and r.width() >= 26:
@@ -1242,6 +1288,11 @@ class OcclusionCanvas(QWidget):
             return
 
         if self._tool == "text":
+            # boxes are painted over annotations, so they take the click
+            for box in reversed(self._boxes):
+                if box.contains_screen(spos.x(), spos.y(), self._disp):
+                    self.label_activated.emit(box.id)
+                    return
             hit = self._annot_at(spos)
             if hit is not None:
                 self.text_activated.emit(hit["id"])

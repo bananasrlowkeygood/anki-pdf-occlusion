@@ -290,7 +290,10 @@ class PDFOcclusionDialog(QDialog):
             "Write text onto the slide (A)\n\n"
             "Drag out a box and type. The text becomes part of the slide, "
             "not a card — occlude it like anything else printed there.\n"
-            "Click text to edit it; clear the text to remove it.")
+            "Click text to edit it; clear the text to remove it.\n\n"
+            "Click an occlusion box instead and you label the mask: a word "
+            "or two shown across it only while that box is the one being "
+            "asked about.")
         self._text_btn.clicked.connect(lambda: self._set_tool("text"))
 
         self._detect_btn = QPushButton("Detect")
@@ -342,6 +345,7 @@ class PDFOcclusionDialog(QDialog):
         self._canvas.scan_cancelled.connect(self._on_scan_cancelled)
         self._canvas.text_region.connect(self._on_text_region)
         self._canvas.text_activated.connect(self._on_text_activated)
+        self._canvas.label_activated.connect(self._on_label_activated)
         self._scroll = QScrollArea()
         self._scroll.setWidget(self._canvas)
         self._scroll.setWidgetResizable(False)
@@ -995,6 +999,24 @@ class PDFOcclusionDialog(QDialog):
             # emptied — that is how you take one back off
             here.remove(found)
         self._annots_changed()
+
+    def _on_label_activated(self, box_id: str):
+        """Text tool on an occlusion box: write a label across the mask.
+
+        A word or two saying what kind of answer is wanted, shown only while
+        that box is the one being asked about — so it prompts without
+        answering. Too small a box has nowhere legible to put it, and the
+        rule for that is card_builder's, not this dialog's.
+        """
+        if not self._canvas.label_fits_box(box_id):
+            self._say_detect("Box too small for a label", transient=True)
+            return
+        text, ok = QInputDialog.getText(
+            self, "Label on Mask",
+            "Shown across this mask while it is the box being asked about:",
+            text=self._canvas.box_label(box_id))
+        if ok:
+            self._canvas.set_box_label(box_id, text.strip())
 
     def _annots_changed(self):
         here = self._annots.get(self._page_index, [])
