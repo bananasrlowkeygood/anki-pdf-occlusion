@@ -151,6 +151,7 @@ class PDFOcclusionDialog(QDialog):
         self._build_ui()
 
         self._canvas.set_mask_color(tuple(_cfg("mask_color", [120, 120, 120])))
+        self._canvas.set_editing_opacity(int(_cfg("editing_mask_opacity", 150)))
         self._apply_default_zoom()
 
         # Opened from a PDF Occlusion card in Browse? Jump straight to the
@@ -298,6 +299,13 @@ class PDFOcclusionDialog(QDialog):
         self._cloze_btn.setToolTip("Cloze card from this slide (Ctrl+Shift+V)")
         self._cloze_btn.clicked.connect(self._open_cloze)
 
+        # Only worth reaching for when editing_mask_opacity is high enough
+        # to hide the slide, but it costs nothing to leave it available.
+        self._peek_btn = QPushButton("Peek")
+        self._peek_btn.setCheckable(True)
+        self._peek_btn.setToolTip("See through the masks (P)")
+        self._peek_btn.clicked.connect(self._toggle_peek)
+
         slide_mode_label = QLabel("This slide:")
         slide_mode_label.setStyleSheet("color:rgba(127,127,127,0.9);")
         self._page_mode_combo = QComboBox()
@@ -312,6 +320,7 @@ class PDFOcclusionDialog(QDialog):
         row3.addSpacing(10)
         row3.addWidget(self._detect_btn)
         row3.addWidget(self._cloze_btn)
+        row3.addWidget(self._peek_btn)
         row3.addSpacing(10)
         self._detect_hint = QLabel("")
         self._detect_hint.setStyleSheet(
@@ -436,6 +445,7 @@ class PDFOcclusionDialog(QDialog):
         QShortcut(QKeySequence("V"), self, lambda: self._set_tool("select"))
         QShortcut(QKeySequence("T"), self, lambda: self._set_tool("text"))
         QShortcut(QKeySequence("F"), self, self._arm_detect)
+        QShortcut(QKeySequence("P"), self, self._toggle_peek)
         # V for Vasu, who asked for the cloze composer. Plain V is already
         # the Select tool, so it takes the modifiers.
         QShortcut(QKeySequence("Ctrl+Shift+V"), self, self._open_cloze)
@@ -1009,6 +1019,11 @@ class PDFOcclusionDialog(QDialog):
         # follows the drag already say what is going on.
         self._say_detect("")
 
+    def _toggle_peek(self, _checked=None):
+        """Flip the masks between the configured opacity and see-through."""
+        self._canvas.set_peeking(not self._canvas.peeking())
+        self._peek_btn.setChecked(self._canvas.peeking())
+
     def _on_scan_cancelled(self):
         self._detect_btn.setChecked(False)
         self._say_detect("")
@@ -1150,6 +1165,7 @@ class PDFOcclusionDialog(QDialog):
         self._text_btn.setEnabled(has)
         self._detect_btn.setEnabled(has)
         self._cloze_btn.setEnabled(has)
+        self._peek_btn.setEnabled(has)
         self._page_mode_combo.setEnabled(has)
         self._sync_notes_pdf_btn()
 

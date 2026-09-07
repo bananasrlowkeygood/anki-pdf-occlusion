@@ -3,6 +3,7 @@
     "render_dpi_scale": 2.0,
     "mask_color": [120, 120, 120],
     "mask_opacity": 255,
+    "editing_mask_opacity": 150,
     "highlight_color": [131, 110, 170],
     "add_editor_button": true,
     "close_after_creating": true,

@@ -61,6 +61,15 @@ from aqt.qt import (
 # set_mask_color() so the editing preview matches the card output.
 _DEFAULT_MASK_RGB = (120, 120, 120)
 
+# Fill alpha of the masks while editing. 150 is see-through enough to keep
+# the slide readable while drawing; the dialog overrides it from config via
+# set_editing_opacity(), and 255 turns building a deck into a recall
+# exercise — a box hides what it covers the moment it is drawn. Peek drops
+# the fill to _PEEK_ALPHA so placement can be checked without changing the
+# setting.
+_DEFAULT_EDIT_ALPHA = 150
+_PEEK_ALPHA         = 45
+
 _SEL_FILL         = QColor(255, 199, 44, 185)   # gold — selection pops on purple
 _SEL_BORDER       = QColor(178, 128, 0, 240)
 _HANDLE_OUTLINE   = QColor(255, 255, 255, 240)
@@ -178,7 +187,8 @@ def _group_color(gid: int, selected: bool, alpha: int = 160) -> QColor:
     r, g, b = _GROUP_PALETTE[gid % len(_GROUP_PALETTE)]
     if selected:
         # brighten border when selected
-        return QColor(min(r + 40, 255), min(g + 40, 255), min(b + 40, 255), alpha + 30)
+        return QColor(min(r + 40, 255), min(g + 40, 255), min(b + 40, 255),
+                      min(alpha + 30, 255))
     return QColor(r, g, b, alpha)
 
 
@@ -464,6 +474,8 @@ class OcclusionCanvas(QWidget):
         self._selected: set[_Box] = set()
         self._next_gid: int = 0   # monotonic group-id counter
         self._tool: str = "draw"
+        self._edit_alpha = _DEFAULT_EDIT_ALPHA
+        self._peeking = False
         self.set_mask_color(_DEFAULT_MASK_RGB)
 
         # undo/redo — per slide, reset on set_image
@@ -517,13 +529,52 @@ class OcclusionCanvas(QWidget):
         return self._pixmap is not None
 
     def set_mask_color(self, rgb: tuple):
-        """Match the editing preview to the configured card mask colour.
-        Kept semi-transparent on the canvas so the slide stays readable
-        while drawing."""
-        r, g, b = rgb[:3]
-        self._ungrouped_fill = QColor(r, g, b, 150)
+        """Match the editing preview to the configured card mask colour."""
+        self._mask_rgb = tuple(rgb[:3])
+        self._rebuild_mask_colors()
+
+    def set_editing_opacity(self, alpha: int):
+        """Fill alpha (0-255) of the masks on the canvas.
+
+        Separate from the card's mask_opacity: this one only governs what
+        the slide looks like while boxes are being drawn.
+        """
+        self._edit_alpha = max(0, min(255, int(alpha)))
+        self._rebuild_mask_colors()
+        self.update()
+
+    def set_peeking(self, on: bool):
+        """See through the masks for a moment to check where they landed.
+
+        Only ever makes them more transparent, so it stays a peek even when
+        the configured opacity is already low.
+        """
+        on = bool(on)
+        if on == self._peeking:
+            return
+        self._peeking = on
+        self._rebuild_mask_colors()
+        self.update()
+
+    def peeking(self) -> bool:
+        return self._peeking
+
+    def _fill_alpha(self) -> int:
+        if self._peeking:
+            return min(_PEEK_ALPHA, self._edit_alpha)
+        return self._edit_alpha
+
+    def _rebuild_mask_colors(self):
+        """Every mask fill honours one alpha, so an opaque canvas really is
+        opaque — selection and grouping stay legible through colour, the
+        borders and the handles rather than through transparency."""
+        r, g, b = self._mask_rgb
+        a = self._fill_alpha()
+        self._ungrouped_fill = QColor(r, g, b, a)
         self._ungrouped_border = QColor(
             int(r * 0.6), int(g * 0.6), int(b * 0.6), 225)
+        self._sel_fill = QColor(_SEL_FILL.red(), _SEL_FILL.green(),
+                                _SEL_FILL.blue(), a)
 
     def set_tool(self, tool: str):
         """Active tool: "draw" (boxes), "select" (marquee), "text" (annotations)."""
@@ -1210,10 +1261,10 @@ class OcclusionCanvas(QWidget):
                 p.translate(-c.x() * self._disp, -c.y() * self._disp)
 
             if box.group is not None:
-                fill = _group_color(box.group, sel, alpha=160)
+                fill = _group_color(box.group, sel, alpha=self._fill_alpha())
                 border = _group_color(box.group, sel, alpha=230)
             else:
-                fill = _SEL_FILL if sel else self._ungrouped_fill
+                fill = self._sel_fill if sel else self._ungrouped_fill
                 border = _SEL_BORDER if sel else self._ungrouped_border
 
             self._paint_shape(p, box, r, fill, border, 2.0 if sel else 1.5)
