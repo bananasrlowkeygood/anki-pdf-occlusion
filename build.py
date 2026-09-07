@@ -40,6 +40,7 @@ ADDON_FILES = [
     "cloze_dialog.py",
     "ocr.py",
     "session_store.py",
+    "note_recovery.py",
     "config.json",
     "config.md",
     "manifest.json",

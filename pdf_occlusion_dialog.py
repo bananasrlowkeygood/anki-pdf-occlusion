@@ -10,15 +10,16 @@ from aqt.qt import (
     Qt, QRect, QImage, QPainter, QProgressDialog, QMenu,
     QDesktopServices, QUrl, QTimer,
 )
-from aqt.utils import askUser, showInfo, showWarning
+from aqt.utils import askUser, showInfo, showWarning, tooltip
 
+from . import note_recovery
 from . import session_store
 from .cloze_dialog import ClozeColumn, ClozeComposer, fly_to_chip
 from .occlusion_canvas import (OcclusionCanvas, annotation_rect,
                                draw_annotation)
 from .card_builder import (ensure_note_type, create_occlusion_notes,
                            create_cloze_notes, cloze_note_type,
-                           cloze_card_count)
+                           cloze_card_count, pdf_path_in, SLIDES_PDF_FIELD)
 from . import ocr
 from .pdf_renderer import (render_pdf, get_text_word_rects, get_page_text,
                            get_table_cell_rects, merge_word_rects)
@@ -162,13 +163,117 @@ class PDFOcclusionDialog(QDialog):
     def _open_note(self, nid: int):
         found = session_store.find_note(nid)
         if not found:
-            return  # card predates sessions or its session was discarded
+            # No session for this card — it was cleared, made on another
+            # machine, or predates the store. The cards themselves still
+            # know enough to put one back.
+            self._recover_note(nid)
+            return
         path, region_key = found
         if not os.path.exists(path):
             showWarning(f"The PDF for this card can no longer be found:\n{path}")
             return
         self._open_paths([path], silent_resume=True)
         self._focus_region(region_key)
+
+    def _recover_note(self, nid: int):
+        """Rebuild this card's session from the cards made off the same PDF."""
+        progress = QProgressDialog("Finding this card's slides…", None, 0, 0, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(400)
+
+        def on_progress(done: int, total: int):
+            progress.setMaximum(total)
+            progress.setValue(done)
+            mw.app.processEvents()
+
+        try:
+            plan = note_recovery.recover(mw.col, nid, on_progress)
+        finally:
+            progress.close()
+
+        if plan is None:
+            # Naming the file is the difference between "start over" and
+            # "put that file back" — the boxes are still in the card.
+            path = self._slides_pdf_of(nid)
+            if path:
+                showWarning(
+                    "This card's boxes can be read back, but its PDF is no "
+                    f"longer here:\n{path}\n\n"
+                    "Put the file back at that path (or restore its name) "
+                    "and open the card again."
+                )
+            else:
+                showWarning(
+                    "This card can't be opened for editing.\n\n"
+                    "Its slides are not in a saved session and the card "
+                    "doesn't record which PDF it came from.\n\n"
+                    "Open the PDF with Open PDF and draw the boxes again."
+                )
+            return
+
+        self._open_paths([plan["pdf_path"]], silent_resume=True)
+        if not self._docs:
+            return
+        restored = self._apply_recovery(plan)
+        self._show_page()
+        if plan["focus"]:
+            self._focus_region(plan["focus"])
+        if restored:
+            tooltip(f"Rebuilt {restored} slide(s) from your cards — "
+                    "editing them updates those cards in place.", period=5000)
+
+    def _slides_pdf_of(self, nid: int) -> str:
+        try:
+            note = mw.col.get_note(nid)
+        except Exception:
+            return ""
+        if SLIDES_PDF_FIELD not in note:
+            return ""
+        return pdf_path_in(note[SLIDES_PDF_FIELD])
+
+    def _apply_recovery(self, plan: dict) -> int:
+        """Fill in slides the session doesn't already cover.
+
+        Never overwrites boxes that are already loaded: a session that
+        exists but has simply lost track of one card stays the truth.
+        """
+        doc = self._docs[0]
+        if doc["path"] != plan["pdf_path"]:
+            return 0
+        if plan["lecture"]:
+            doc["lecture"] = plan["lecture"]
+        if plan["notes_pdf"] and not doc.get("notes_pdf"):
+            doc["notes_pdf"] = plan["notes_pdf"]
+
+        restored = 0
+        for local, page in plan["pages"].items():
+            if not 0 <= local < doc["count"]:
+                continue
+            idx = doc["start"] + local
+            if self._boxes.get(idx):
+                continue
+            img = self._pages[idx]
+            # The boxes are in the pixel space of whatever render scale the
+            # cards were made at; these pages are rendered at the current one.
+            fx = img.width() / page["w"] if page["w"] else 1.0
+            fy = img.height() / page["h"] if page["h"] else 1.0
+            for b in page["boxes"]:
+                b["x"] = int(round(b["x"] * fx))
+                b["y"] = int(round(b["y"] * fy))
+                b["w"] = max(1, int(round(b["w"] * fx)))
+                b["h"] = max(1, int(round(b["h"] * fy)))
+            self._boxes[idx] = page["boxes"]
+            if page["mode"] in ("ao", "oa"):
+                self._page_modes[idx] = page["mode"]
+            # The saved slide PNG is only the right one at the same scale.
+            if page["image"] and fx == 1.0 and fy == 1.0:
+                doc["image_map"][str(local)] = page["image"]
+            doc["note_map"].update(page["note_map"])
+            restored += 1
+
+        if restored:
+            self._persist_sessions()
+        return restored
 
     def _focus_region(self, key: str):
         if not self._docs:

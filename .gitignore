@@ -5,3 +5,4 @@ __pycache__/
 .Rhistory
 vendor/
 *.ankiaddon
+user_files/
