@@ -404,13 +404,6 @@ class PDFOcclusionDialog(QDialog):
         self._cloze_btn.setToolTip("Cloze card from this slide (Ctrl+Shift+V)")
         self._cloze_btn.clicked.connect(self._open_cloze)
 
-        # Only worth reaching for when editing_mask_opacity is high enough
-        # to hide the slide, but it costs nothing to leave it available.
-        self._peek_btn = QPushButton("Peek")
-        self._peek_btn.setCheckable(True)
-        self._peek_btn.setToolTip("See through the masks (P)")
-        self._peek_btn.clicked.connect(self._toggle_peek)
-
         slide_mode_label = QLabel("This slide:")
         slide_mode_label.setStyleSheet("color:rgba(127,127,127,0.9);")
         self._page_mode_combo = QComboBox()
@@ -425,7 +418,6 @@ class PDFOcclusionDialog(QDialog):
         row3.addSpacing(10)
         row3.addWidget(self._detect_btn)
         row3.addWidget(self._cloze_btn)
-        row3.addWidget(self._peek_btn)
         row3.addSpacing(10)
         self._detect_hint = QLabel("")
         self._detect_hint.setStyleSheet(
@@ -1124,10 +1116,13 @@ class PDFOcclusionDialog(QDialog):
         # follows the drag already say what is going on.
         self._say_detect("")
 
-    def _toggle_peek(self, _checked=None):
-        """Flip the masks between the configured opacity and see-through."""
+    def _toggle_peek(self):
+        """P — flip the masks between the configured opacity and see-through.
+
+        Keyboard only: worth reaching for just when editing_mask_opacity is
+        high enough to hide the slide, which is not the default.
+        """
         self._canvas.set_peeking(not self._canvas.peeking())
-        self._peek_btn.setChecked(self._canvas.peeking())
 
     def _on_scan_cancelled(self):
         self._detect_btn.setChecked(False)
@@ -1270,7 +1265,6 @@ class PDFOcclusionDialog(QDialog):
         self._text_btn.setEnabled(has)
         self._detect_btn.setEnabled(has)
         self._cloze_btn.setEnabled(has)
-        self._peek_btn.setEnabled(has)
         self._page_mode_combo.setEnabled(has)
         self._sync_notes_pdf_btn()
 
