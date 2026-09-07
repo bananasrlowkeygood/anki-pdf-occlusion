@@ -4,11 +4,11 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-836EAA?style=flat-square)](https://github.com/bananasrlowkeygood/anki-pdf-occlusion)
 [![License](https://img.shields.io/badge/license-MIT-836EAA?style=flat-square)](LICENSE)
 
-Image occlusion cards straight from PDF lecture slides — open a PDF, draw boxes over what you want to memorize, make cards in bulk. Cloze cards too, for slides that don't suit occlusion.
+**PDF Occlusion** is an Anki add-on that creates image occlusion cards directly from PDF lecture slides. No more importing one image at a time. Open any PDF (or several at once), draw boxes over what you want to memorize, and generate cards in bulk. Built for studying from slide-heavy lectures.
 
 ## Install
 
-Add-on code `783821131`, then restart Anki. The PDF renderer is bundled for macOS, Windows and Linux — nothing else to install.
+Add-on code `783821131`, then restart Anki.
 
 ## Quick Start
 
