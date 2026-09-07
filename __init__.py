@@ -278,6 +278,43 @@ def _on_js_message(handled, message: str, context):
 gui_hooks.webview_did_receive_js_message.append(_on_js_message)
 
 
+# ── "Show All" from the keyboard while reviewing ──────────────────────────────
+#
+# The back of a card carries a Show All button that swaps the answer mask for
+# an empty one, revealing the whole slide. Reaching for it with the mouse in
+# the middle of a review is the slow part, so a key presses the button itself
+# rather than reimplementing it — one behaviour, defined in the template.
+#
+# The key is appended to the reviewer's own shortcut list. Anki lets the last
+# entry win, so a key that Anki already uses would be taken over rather than
+# clash; the default is one it doesn't.
+
+_SHOW_ALL_JS = """(function(){
+  var b = document.getElementById('io-toggle-btn');
+  if (b) b.click();
+})();"""
+
+
+def _toggle_show_all() -> None:
+    reviewer = getattr(mw, "reviewer", None)
+    # Only on the back: the front has no such button, and revealing the
+    # slide there would be answering the card for you.
+    if mw.state != "review" or reviewer is None or reviewer.state != "answer":
+        return
+    reviewer.web.eval(_SHOW_ALL_JS)
+
+
+def _add_show_all_shortcut(state: str, shortcuts: list) -> None:
+    if state != "review":
+        return
+    key = str(_get_config().get("show_all_shortcut", "g") or "").strip()
+    if key:
+        shortcuts.append((key, _toggle_show_all))
+
+
+gui_hooks.state_shortcuts_will_change.append(_add_show_all_shortcut)
+
+
 # ── Auto-cleanup media when our notes are deleted ─────────────────────────────
 #
 # Strategy:

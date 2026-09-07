@@ -9,5 +9,6 @@
     "close_after_creating": true,
     "note_type_name": "PDF Occlusion",
     "default_deck": "",
-    "occlusion_mode": "ao"
+    "occlusion_mode": "ao",
+    "show_all_shortcut": "g"
 }
