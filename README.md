@@ -63,16 +63,6 @@ Add-on code `783821131`, then restart Anki. The PDF renderer is bundled for macO
 | `add_editor_button` | `bool` | `true` | Show the toolbar button in the card editor |
 | `close_after_creating` | `bool` | `true` | Close the dialog once cards are created |
 
-## Worth Knowing
-
-- **`Create All Cards` is safe to re-run.** Existing cards are updated in place, scheduling and review history untouched. New boxes become new cards; deleted boxes prompt before their cards go.
-- **Edit a card later** by selecting it in Browse and pressing `Ctrl+Shift+P`. Its slide opens with its box selected, even if the saved session is gone.
-- **Detect never scans a whole slide** — press `F`, then drag over the part you want. Ruled tables come out cell by cell, everything else word by word.
-- **Detect on a picture-only slide needs macOS** (its built-in text recognition). Windows and Linux report nothing found there.
-- **Occlusion mode** is set per PDF (config), per slide (the `This slide` picker), or per box (right-click). Most specific wins.
-- **Rotate** by hovering just outside a corner until the cursor curves. Right-click → `Reset Rotation` to straighten.
-- **Right-click** a box for grouping, notes and mode overrides.
-
 ## Contact
 
 - Ravi Bandaru: ravi.bandaru@northwestern.edu
