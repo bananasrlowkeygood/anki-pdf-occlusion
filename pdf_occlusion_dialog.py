@@ -13,6 +13,7 @@ from aqt.qt import (
 from aqt.utils import askUser, showInfo, showWarning, tooltip
 
 from . import note_recovery
+from . import pdf_hosting
 from . import session_store
 from .cloze_dialog import ClozeColumn, ClozeComposer, fly_to_chip
 from .occlusion_canvas import (OcclusionCanvas, annotation_rect,
@@ -118,6 +119,33 @@ def _cfg(key, default):
     return cfg.get(key, default)
 
 
+def _push_published(hosting: dict, urls: list) -> None:
+    """Commit and push the PDFs just published, off the main thread.
+
+    Runs once the cards exist and doesn't hold the dialog open: a failed push
+    costs nothing but the phone links working until a later one goes through.
+    """
+    def on_done(fut):
+        try:
+            pushed = fut.result()
+        except pdf_hosting.PublishError as e:
+            showWarning(
+                "Your cards were made, but their PDFs couldn't be pushed to "
+                f"the web, so the links won't open on your phone yet.\n\n{e}\n\n"
+                f"The files are in {hosting['folder']}. The next Create All "
+                "Cards tries the push again, or run git push there yourself.",
+                title="PDF Occlusion",
+            )
+            return
+        if pushed:
+            tooltip("Slides / Notes PDFs pushed — your phone can open them "
+                    "once the site updates (usually a minute or two).",
+                    period=6000)
+
+    mw.taskman.run_in_background(lambda: pdf_hosting.push(hosting, urls),
+                                 on_done)
+
+
 class PDFOcclusionDialog(QDialog):
     def __init__(self, parent=None, editor=None, note_id=None):
         super().__init__(parent)
@@ -187,7 +215,9 @@ class PDFOcclusionDialog(QDialog):
             mw.app.processEvents()
 
         try:
-            plan = note_recovery.recover(mw.col, nid, on_progress)
+            plan = note_recovery.recover(
+                mw.col, nid, on_progress,
+                hosting=pdf_hosting.settings(_cfg("pdf_hosting", None)))
         finally:
             progress.close()
 
@@ -1481,6 +1511,25 @@ class PDFOcclusionDialog(QDialog):
                 "(Tools → Manage Note Types → Add) and create again."
             )
 
+        # With pdf_hosting set, the cards get each PDF's public URL instead of
+        # its path, so the Notes / Slides buttons open on a phone too. A PDF
+        # that can't be copied keeps its path — the cards still open it on
+        # this computer — and is reported with the rest of the summary.
+        hosting = pdf_hosting.settings(_cfg("pdf_hosting", None))
+        links: dict = {}            # location in the session -> on the cards
+        unpublished: list = []
+        if hosting:
+            for doc, to_create, _cloze in per_doc:
+                for loc in (doc["path"], doc.get("notes_pdf", "")):
+                    if not to_create or not loc or loc in links:
+                        continue
+                    try:
+                        links[loc] = pdf_hosting.publish(loc, hosting)
+                    except OSError as e:
+                        links[loc] = loc
+                        unpublished.append(
+                            f"{os.path.basename(loc)}: {e.strerror or e}")
+
         created = updated = unchanged = slides = cloze_made = 0
         stale_nids: list[int] = list(self._cloze_stale)
         offset = 0
@@ -1507,8 +1556,9 @@ class PDFOcclusionDialog(QDialog):
                     highlight_color=highlight_color,
                     lecture_name=doc["lecture"],
                     total_slides=count,
-                    slides_pdf=doc["path"],
-                    notes_pdf=doc.get("notes_pdf", ""),
+                    slides_pdf=links.get(doc["path"], doc["path"]),
+                    notes_pdf=links.get(doc.get("notes_pdf", ""),
+                                        doc.get("notes_pdf", "")),
                     default_mode=mode,
                     page_modes=local_modes,
                     note_map=doc.get("note_map"),
@@ -1588,6 +1638,14 @@ class PDFOcclusionDialog(QDialog):
             msg = "Cards: " + ", ".join(bits) + "."
         if cloze_made:
             msg += f"\n\n{cloze_made} of them cloze."
+        if unpublished:
+            msg += ("\n\nCouldn't publish these, so their buttons only work "
+                    "on this computer:\n" + "\n".join(unpublished))
+
+        # Started before the summary so it runs while that's being read.
+        if hosting and hosting["git_push"]:
+            _push_published(hosting, [u for u in links.values()
+                                      if pdf_hosting.is_url(u)])
         showInfo(msg)
         if _cfg("close_after_creating", True):
             self.accept()

@@ -41,6 +41,7 @@ ADDON_FILES = [
     "ocr.py",
     "session_store.py",
     "note_recovery.py",
+    "pdf_hosting.py",
     "config.json",
     "config.md",
     "manifest.json",

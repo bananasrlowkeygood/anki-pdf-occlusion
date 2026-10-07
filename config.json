@@ -10,5 +10,10 @@
     "note_type_name": "PDF Occlusion",
     "default_deck": "",
     "occlusion_mode": "ao",
-    "show_all_shortcut": "g"
+    "show_all_shortcut": "g",
+    "pdf_hosting": {
+        "folder": "",
+        "base_url": "",
+        "git_push": true
+    }
 }

@@ -62,6 +62,7 @@ Add-on code `783821131`, then restart Anki.
 | `note_type_name` | `string` | `"PDF Occlusion"` | Note type to create or reuse |
 | `add_editor_button` | `bool` | `true` | Show the toolbar button in the card editor |
 | `close_after_creating` | `bool` | `true` | Close the dialog once cards are created |
+| `pdf_hosting` | object | off | Publish the Notes / Slides PDFs so the card buttons open on your phone: `folder` you serve on the web (e.g. a GitHub Pages clone), its `base_url`, and `git_push` to commit and push them for you with your own git credentials. Off = cards keep local paths, desktop only. Published PDFs are public |
 
 ## Contact
 

@@ -27,6 +27,7 @@ import uuid
 from typing import Optional
 from xml.etree import ElementTree
 
+from . import pdf_hosting
 from .card_builder import NOTES_PDF_FIELD, SLIDES_PDF_FIELD, pdf_path_in
 
 _NS = "{http://www.w3.org/2000/svg}"
@@ -194,7 +195,11 @@ def _slide_of(note) -> Optional[tuple]:
 
 
 def _sibling_nids(col, note, path: str, on_progress=None) -> list:
-    """Every note of the same type made from the same PDF."""
+    """Every note of the same type made from the same PDF.
+
+    `path` is the field's own value — a path or, for a published PDF, its
+    URL — so siblings are matched on what the cards record.
+    """
     out = []
     nids = col.find_notes(f"mid:{note.mid}")
     for i, nid in enumerate(nids):
@@ -209,11 +214,13 @@ def _sibling_nids(col, note, path: str, on_progress=None) -> list:
     return out
 
 
-def recover(col, nid: int, on_progress=None) -> Optional[dict]:
+def recover(col, nid: int, on_progress=None,
+            hosting: Optional[dict] = None) -> Optional[dict]:
     """Rebuild everything the cards of one PDF know about their session.
 
     Returns None when the note is not one of ours, records no PDF, or the
-    PDF is no longer where it was. Otherwise:
+    PDF is no longer where it was. A published PDF is read from its copy in
+    the `hosting` folder (pdf_hosting.settings). Otherwise:
 
         {"pdf_path", "notes_pdf", "lecture", "focus",
          "pages": {local page: {"w", "h", "boxes", "note_map",
@@ -228,7 +235,8 @@ def recover(col, nid: int, on_progress=None) -> Optional[dict]:
         return None
     if SLIDES_PDF_FIELD not in note or "Question Mask" not in note:
         return None
-    path = pdf_path_in(note[SLIDES_PDF_FIELD])
+    location = pdf_path_in(note[SLIDES_PDF_FIELD])
+    path = pdf_hosting.local_pdf(location, hosting)
     if not path or not os.path.exists(path):
         return None
 
@@ -236,14 +244,18 @@ def recover(col, nid: int, on_progress=None) -> Optional[dict]:
     notes_pdf = ""
     # slide -> the notes on it, newest last
     by_page: dict = {}
-    for n in _sibling_nids(col, note, path, on_progress):
+    for n in _sibling_nids(col, note, location, on_progress):
         slide = _slide_of(n)
         mask = _read_mask(col, n) if slide else None
         if not slide or not mask:
             continue
         lecture = lecture or slide[0]
         if not notes_pdf and NOTES_PDF_FIELD in n:
-            notes_pdf = pdf_path_in(n[NOTES_PDF_FIELD])
+            # No local copy of a published one? Keep its URL rather than
+            # drop it — the next Create All Cards would clear it from the
+            # cards otherwise.
+            notes_loc = pdf_path_in(n[NOTES_PDF_FIELD])
+            notes_pdf = pdf_hosting.local_pdf(notes_loc, hosting) or notes_loc
         by_page.setdefault(slide[1], []).append({
             "nid": n.id, "mod": n.mod, "mask": mask,
             "note": _plain(n["Notes"]) if "Notes" in n else "",

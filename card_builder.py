@@ -76,10 +76,12 @@ _FRONT_TMPL = """\
 })();
 </script>"""
 
-# Source documents. Both hold an absolute filesystem path, not a copy of the
-# PDF: lecture decks run to tens of MB and copying them into collection.media
-# would wreck AnkiWeb sync. The paths are opened by the desktop add-on (see
-# __init__._open_linked_pdf); on mobile the buttons are simply inert.
+# Source documents. Each holds where the PDF is, never a copy of it: lecture
+# decks run to tens of MB and copying them into collection.media would wreck
+# AnkiWeb sync. By default that's an absolute filesystem path, opened by the
+# desktop add-on (see __init__._open_linked_pdf) and useless anywhere else.
+# With pdf_hosting configured it's the PDF's public URL, which every client
+# can open (see pdf_hosting.py).
 SLIDES_PDF_FIELD = "Slides PDF"
 NOTES_PDF_FIELD = "Notes PDF"
 DOC_FIELDS = (SLIDES_PDF_FIELD, NOTES_PDF_FIELD)
@@ -90,17 +92,37 @@ JS_PREFIX = "pdfocc:open:"
 DOC_FIELD_BY_KIND = {"slides": SLIDES_PDF_FIELD, "notes": NOTES_PDF_FIELD}
 
 # Rendered only when the matching field is filled, so a card without notes
-# attached shows no dead button. pycmd is guarded: it doesn't exist in every
-# webview, and on mobile the message goes nowhere.
+# attached shows no dead button. Links rather than buttons, so that on mobile
+# — where there is no pycmd — a URL in the field opens like any other link.
+# The field rides along in a hidden span and the script below reads it from
+# there: textContent survives HTML the editor may have wrapped around the
+# value, which pasting {{Field}} straight into href wouldn't.
 _DOC_BTN_TMPL = """\
-  {{#%(field)s}}<button class="io-doc-btn" onclick="
-    if (typeof pycmd === 'function') pycmd('%(prefix)s%(kind)s');
-  ">%(label)s</button>{{/%(field)s}}"""
+  {{#%(field)s}}<a class="io-doc-btn" onclick="
+    if (typeof pycmd !== 'function') return true;
+    pycmd('%(prefix)s%(kind)s'); return false;
+  ">%(label)s<span class="io-doc-src">{{%(field)s}}</span></a>{{/%(field)s}}"""
+
+# Desktop opens either kind of location through pycmd. Anywhere else only a
+# URL can be opened: link to it, or hide a button that couldn't do anything.
+_DOC_LINK_JS = """\
+<script>
+(function(){
+  var links = document.querySelectorAll(".io-doc-btn");
+  for (var i = 0; i < links.length; i++) {
+    var src = links[i].querySelector(".io-doc-src");
+    var loc = src ? src.textContent.trim() : "";
+    if (/^https?:\\/\\//i.test(loc)) links[i].href = loc;
+    else if (typeof pycmd !== "function") links[i].style.display = "none";
+  }
+})();
+</script>"""
 
 _DOC_BUTTONS = "\n".join(
-    _DOC_BTN_TMPL % {"field": DOC_FIELD_BY_KIND[kind], "prefix": JS_PREFIX,
-                     "kind": kind, "label": label}
-    for kind, label in (("notes", "Notes"), ("slides", "Slides"))
+    [_DOC_BTN_TMPL % {"field": DOC_FIELD_BY_KIND[kind], "prefix": JS_PREFIX,
+                      "kind": kind, "label": label}
+     for kind, label in (("notes", "Notes"), ("slides", "Slides"))]
+    + [_DOC_LINK_JS]
 )
 
 # The back shows the answer mask directly as the overlay — no JS src swap, and
@@ -278,15 +300,23 @@ _CSS = """\
   background: #9885b8;
 }
 /* Quiet secondary buttons — same hairline/purple-tint treatment the add-on
-   dialog gives its non-primary buttons, so card and dialog read as one. */
+   dialog gives its non-primary buttons, so card and dialog read as one.
+   They're links (see _DOC_BTN_TMPL), styled to sit in the bar as buttons. */
 .io-doc-btn {
+  display: inline-block;
+  margin: 3px;
   background: transparent;
   color: inherit;
   font-size: 13px;
+  line-height: normal;
+  text-decoration: none;
   padding: 6px 16px;
   border: 1px solid rgba(131, 110, 170, 0.55);
   border-radius: 4px;
   cursor: pointer;
+}
+.io-doc-src {
+  display: none;
 }
 .io-doc-btn:hover {
   background: rgba(131, 110, 170, 0.16);

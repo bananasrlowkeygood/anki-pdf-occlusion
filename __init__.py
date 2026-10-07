@@ -47,12 +47,14 @@ mw.form.menuTools.addAction(action)
 # decide whether the templates need updating — _notetype_is_current() asks the
 # note type itself. It only scopes a decline to one release.
 
+# v7: Notes / Slides are links, so a published PDF's URL opens on mobile;
+#     buttons that can't open anything there are hidden
 # v6: unclamp the mask overlay — AnkiMobile caps bare <img> at 95% of its
 #     container, which squeezed every mask ~5% horizontally on iOS
 # v5: explicit object-fit on the mask overlay (AnkiMobile alignment)
 # v4: Notes / Slides buttons + the two PDF-path fields behind them
 # v3: Remarks field renamed to Notes; v2: flicker-free reveal
-TEMPLATE_VERSION = 6
+TEMPLATE_VERSION = 7
 
 # Bumped when already-written media files need rewriting, as opposed to the
 # card templates. Unlike a template change this needs no permission and can't
@@ -132,8 +134,10 @@ def _maybe_offer_template_upgrade() -> None:
 
     if askUser(
         "PDF Occlusion's card templates were updated.\n\n"
-        "This release fixes occlusion masks rendering slightly narrow on "
-        "AnkiMobile, which left them shifted from the text they cover.\n\n"
+        "The Notes / Slides buttons can now open on your phone, for PDFs "
+        "published to the web (see \"pdf_hosting\" in the add-on's config). "
+        "Where they can't open anything they're hidden instead of doing "
+        "nothing.\n\n"
         "Update your existing cards now?\n"
         "(if your cards predate the Notes/Slides buttons this also adds two "
         "fields to the note type, so Anki will ask for a one-time full sync)",
@@ -213,9 +217,11 @@ gui_hooks.editor_did_init_buttons.append(_add_editor_button)
 
 # ── Notes / Slides buttons on the card ────────────────────────────────────────
 #
-# The card templates only send back which document was asked for; the path
-# itself lives in the note's "Slides PDF" / "Notes PDF" field and is read here,
-# so nothing the webview says decides what gets opened. Works in the reviewer,
+# The card templates only send back which document was asked for; the
+# location itself lives in the note's "Slides PDF" / "Notes PDF" field and is
+# read here, so nothing the webview says decides what gets opened. A URL
+# opens this machine's copy in the hosting folder when there is one (offline,
+# in the PDF viewer, as a path would), else the browser. Works in the reviewer,
 # the browser preview and the card-layout preview — each supplies a different
 # bridge context, hence the three ways of reaching the note below.
 
@@ -238,6 +244,7 @@ def _note_from_context(context):
 
 def _open_linked_pdf(kind: str, context) -> None:
     from aqt.utils import showWarning
+    from . import pdf_hosting
     from .card_builder import DOC_FIELD_BY_KIND, pdf_path_in
 
     field = DOC_FIELD_BY_KIND.get(kind)
@@ -246,6 +253,11 @@ def _open_linked_pdf(kind: str, context) -> None:
         return
     label = "lecture notes" if kind == "notes" else "slides"
     path = pdf_path_in(note[field]) if field in note else ""
+    if pdf_hosting.is_url(path):
+        hosting = pdf_hosting.settings(_get_config().get("pdf_hosting"))
+        local = pdf_hosting.local_copy(path, hosting)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(local) if local else QUrl(path))
+        return
     if not path:
         showWarning(
             f"No {label} PDF is attached to this card.\n\n"
