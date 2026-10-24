@@ -61,7 +61,7 @@ def _shape_box(el) -> Optional[dict]:
     """One <rect>/<ellipse> back to a box dict, or None for anything else."""
     tag = el.tag.rsplit("}", 1)[-1]
     if tag == "rect":
-        box = {"x": _num(el, "x"), "y": _num(el, "y"),
+        box: dict = {"x": _num(el, "x"), "y": _num(el, "y"),
                "w": _num(el, "width"), "h": _num(el, "height")}
     elif tag == "ellipse":
         rx, ry = _num(el, "rx"), _num(el, "ry")
@@ -339,6 +339,7 @@ def _build_page(page: int, entries: list) -> Optional[dict]:
 
     boxes: list[dict] = []
     key_of: dict = {}          # region id -> region key
+    key: Optional[str]
     boxes_of: dict = {}        # region key -> the boxes in it
     for gid, rid in enumerate(_merged_order(entries)):
         region = source.get(rid)

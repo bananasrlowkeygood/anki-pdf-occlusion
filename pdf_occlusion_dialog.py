@@ -766,7 +766,8 @@ class PDFOcclusionDialog(QDialog):
         if rendered is None:
             return
 
-        docs, all_pages = [], []
+        docs: list[dict] = []
+        all_pages: list = []
         for path, pages in rendered:
             docs.append({
                 "path": path,
@@ -1349,7 +1350,7 @@ class PDFOcclusionDialog(QDialog):
         self._cloze_column.set_cards(self._cloze_cards.get(self._page_index, []))
         self._refit()
 
-    def _find_cloze(self, uid: str):
+    def _find_cloze(self, uid: Optional[str]):
         """(page, index) of a stored card, or (None, None)."""
         for page, cards in self._cloze_cards.items():
             for i, card in enumerate(cards):

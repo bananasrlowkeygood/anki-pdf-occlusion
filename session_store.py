@@ -95,7 +95,7 @@ def find_note(nid: int) -> Optional[tuple]:
 
 def list_sessions(limit: int = 8) -> list[dict]:
     """Most recent sessions, newest first, for the Recent menu."""
-    out = []
+    out: list[dict] = []
     try:
         names = os.listdir(_DIR)
     except OSError:

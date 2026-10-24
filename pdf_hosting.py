@@ -22,7 +22,7 @@ import re
 import shutil
 import subprocess
 import threading
-from typing import Optional
+from typing import Any, Optional
 
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 _UNSAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -119,7 +119,7 @@ def _git(folder: str, *args: str) -> subprocess.CompletedProcess:
     env["PATH"] = os.pathsep.join(
         p for p in (env.get("PATH", ""), "/opt/homebrew/bin", "/usr/local/bin") if p)
     env["GIT_TERMINAL_PROMPT"] = "0"  # fail, don't wait for a password nobody sees
-    kwargs = {}
+    kwargs: dict[str, Any] = {}
     if os.name == "nt":
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:

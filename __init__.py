@@ -22,7 +22,7 @@ def open_pdf_occlusion(editor: Editor = None):
     note_id = None
     if editor is not None:
         note = getattr(editor, "note", None)
-        if note is not None and getattr(note, "id", 0):
+        if note is not None and getattr(note, "id", None):
             note_id = note.id
     dlg = PDFOcclusionDialog(mw, editor=editor, note_id=note_id)
     dlg.exec()

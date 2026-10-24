@@ -840,10 +840,10 @@ def create_occlusion_notes(
     slides_pdf: str = "",
     notes_pdf: str = "",
     default_mode: str = "ao",
-    page_modes: dict = None,
-    tags: list = None,
-    note_map: dict = None,
-    image_map: dict = None,
+    page_modes: Optional[dict] = None,
+    tags: Optional[list] = None,
+    note_map: Optional[dict] = None,
+    image_map: Optional[dict] = None,
     on_progress=None,
 ) -> dict:
     """Create or update occlusion notes for one document.
@@ -898,7 +898,7 @@ def create_occlusion_notes(
 
         # reuse the slide PNG from a previous run when possible
         img_fname = image_map.get(str(page_idx))
-        if not _media_exists(col, img_fname):
+        if not img_fname or not _media_exists(col, img_fname):
             img_fname = _save_media(col, qimage_to_png_bytes(img), ".png")
         new_image_map[str(page_idx)] = img_fname
 
@@ -1099,8 +1099,8 @@ def create_cloze_notes(
     deck_id: int,
     note_type: NotetypeDict,
     cards: list,
-    page_images: dict = None,
-    image_map: dict = None,
+    page_images: Optional[dict] = None,
+    image_map: Optional[dict] = None,
     caption_for=None,
 ) -> dict:
     """Create or update one document's cloze notes.

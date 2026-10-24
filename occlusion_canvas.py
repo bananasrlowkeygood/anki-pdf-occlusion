@@ -302,7 +302,7 @@ class _Box:
 
     def to_dict(self) -> dict:
         n = self.norm()
-        d = {"x": int(n.x), "y": int(n.y),
+        d: dict = {"x": int(n.x), "y": int(n.y),
              "w": int(n.w), "h": int(n.h),
              "group": self.group, "group_uid": self.group_uid,
              "shape": self.shape, "mode": self.mode,
@@ -894,91 +894,6 @@ class OcclusionCanvas(QWidget):
         self.boxes_changed.emit()
         self.update()
 
-    def set_zoom(self, zoom: float):
-        self._zoom = max(0.1, min(4.0, zoom))
-        self._apply_size()
-        self.update()
-
-    def zoom(self) -> float:
-        return self._zoom
-
-    def group_selected(self):
-        """Assign selected boxes to a new shared group."""
-        if len(self._selected) < 2:
-            return
-        # Already exactly one whole group? Nothing to do — this also makes a
-        # held-down G key (auto-repeat) harmless instead of minting a fresh
-        # group id on every repeat.
-        sel_gids = {b.group for b in self._selected}
-        if len(sel_gids) == 1 and None not in sel_gids:
-            gid = next(iter(sel_gids))
-            if self._selected == {b for b in self._boxes if b.group == gid}:
-                return
-        self._push_undo()
-        gid = self._next_gid
-        self._next_gid += 1
-        guid = uuid.uuid4().hex
-        for b in self._selected:
-            b.group = gid
-            b.group_uid = guid
-        self.boxes_changed.emit()
-        self.update()
-
-    def ungroup_selected(self):
-        """Remove group membership from selected boxes."""
-        if not any(b.group is not None for b in self._selected):
-            return
-        self._push_undo()
-        for b in self._selected:
-            b.group = None
-            b.group_uid = None
-        self.boxes_changed.emit()
-        self.update()
-
-    def select_all(self):
-        self._selected = set(self._boxes)
-        self.update()
-
-    def select_region(self, box_id: Optional[str] = None,
-                      group_uid: Optional[str] = None):
-        """Select the box / group backing a specific card (Browse → edit)."""
-        if box_id is not None:
-            self._selected = {b for b in self._boxes if b.id == box_id}
-        elif group_uid is not None:
-            self._selected = {b for b in self._boxes if b.group_uid == group_uid}
-        self.update()
-
-    def selection_count(self) -> int:
-        return len(self._selected)
-
-    def arm_scan(self, on: bool = True):
-        """Wait for one region to be dragged out, for the Detect button.
-
-        While armed the canvas does nothing else — no drawing, no selecting,
-        no moving a box out from under the drag — because the whole point is
-        that the next drag says where to look and nothing else.
-        """
-        self._scan_armed = bool(on)
-        self._scanning = False
-        self._drag_start = None
-        self._drag_current = None
-        self._update_cursor()
-        self.update()
-
-    def scan_armed(self) -> bool:
-        return self._scan_armed
-
-    def _cancel_scan(self):
-        was = self._scan_armed
-        self._scan_armed = False
-        self._scanning = False
-        self._drag_start = None
-        self._drag_current = None
-        self._update_cursor()
-        self.update()
-        if was:
-            self.scan_cancelled.emit()
-
     def replace_boxes(self, remove_ids: set, dicts: list[dict],
                       select: bool = False):
         """Swap one set of boxes for another in a single undo step.
@@ -1477,6 +1392,7 @@ class OcclusionCanvas(QWidget):
 
     def _apply_rotate(self, ipos: QPointF, shift: bool):
         pivot = self._rot_pivot
+        assert pivot is not None and self._rotating is not None
         delta = math.degrees(math.atan2(ipos.y() - pivot.y(),
                                         ipos.x() - pivot.x())) - self._rot_start
         if shift:
