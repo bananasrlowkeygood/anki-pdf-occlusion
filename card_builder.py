@@ -863,6 +863,9 @@ def create_occlusion_notes(
     last run (the caller decides whether to remove them). A note whose
     masks, header, and notes are all identical to the current boxes is left
     completely untouched and counted as unchanged.
+
+    on_progress(done, total) is called before each page; returning False
+    stops there, and the result covers only the pages already done.
     """
     page_modes = page_modes or {}
     tags = [t for t in (tags or []) if t]
@@ -887,96 +890,105 @@ def create_occlusion_notes(
         return all(fname not in n or n[fname] == val
                    for fname, val in doc_fields.items())
 
-    for done, (page_idx, img, boxes) in enumerate(pages):
-        if on_progress:
-            on_progress(done, len(pages))
-        W, H = img.width(), img.height()
-        page_mode = page_modes.get(page_idx, page_modes.get(str(page_idx)))
+    processed = set()
+    try:
+        for done, (page_idx, img, boxes) in enumerate(pages):
+            if on_progress and on_progress(done, len(pages)) is False:
+                break
+            processed.add(page_idx)
+            W, H = img.width(), img.height()
+            page_mode = page_modes.get(page_idx, page_modes.get(str(page_idx)))
 
-        slide_label = f"Slide {page_idx + 1}/{total_slides}" if total_slides else f"Slide {page_idx + 1}"
-        header_prefix = f"{lecture_name} · {slide_label}" if lecture_name else slide_label
+            slide_label = f"Slide {page_idx + 1}/{total_slides}" if total_slides else f"Slide {page_idx + 1}"
+            header_prefix = f"{lecture_name} · {slide_label}" if lecture_name else slide_label
 
-        # reuse the slide PNG from a previous run when possible
-        img_fname = image_map.get(str(page_idx))
-        if not img_fname or not _media_exists(col, img_fname):
-            img_fname = _save_media(col, qimage_to_png_bytes(img), ".png")
-        new_image_map[str(page_idx)] = img_fname
+            # reuse the slide PNG from a previous run when possible
+            img_fname = image_map.get(str(page_idx))
+            if not img_fname or not _media_exists(col, img_fname):
+                img_fname = _save_media(col, qimage_to_png_bytes(img), ".png")
+            new_image_map[str(page_idx)] = img_fname
 
-        for key, region_boxes in _regions_for(page_idx, boxes):
-            mode = _resolve_mode(region_boxes, page_mode, default_mode)
-            q_svg, a_svg = _make_masks(W, H, region_boxes, boxes, mask_color,
-                                       mode, opacity, highlight_color)
-            remarks = _region_note(region_boxes)
-            remarks_html = html.escape(remarks).replace("\n", "<br>")
+            for key, region_boxes in _regions_for(page_idx, boxes):
+                mode = _resolve_mode(region_boxes, page_mode, default_mode)
+                q_svg, a_svg = _make_masks(W, H, region_boxes, boxes, mask_color,
+                                           mode, opacity, highlight_color)
+                remarks = _region_note(region_boxes)
+                remarks_html = html.escape(remarks).replace("\n", "<br>")
 
-            note = None
-            old_nid = note_map.get(key)
-            if old_nid:
-                try:
-                    note = col.get_note(old_nid)
-                except Exception:
-                    note = None  # deleted in Anki since last run → recreate
+                note = None
+                old_nid = note_map.get(key)
+                if old_nid:
+                    try:
+                        note = col.get_note(old_nid)
+                    except Exception:
+                        note = None  # deleted in Anki since last run → recreate
 
-            # the field was "Remarks" before v3 — tolerate custom note types
-            # that haven't been migrated
-            def _set_notes(n):
-                if remarks:
-                    for f in ("Notes", "Remarks"):
-                        if f in n:
-                            n[f] = remarks_html
-                            return
+                # the field was "Remarks" before v3 — tolerate custom note types
+                # that haven't been migrated
+                def _set_notes(n):
+                    if remarks:
+                        for f in ("Notes", "Remarks"):
+                            if f in n:
+                                n[f] = remarks_html
+                                return
 
-            if note is not None:
-                old_q = _svg_fnames_in(note["Question Mask"])
-                old_a = _svg_fnames_in(note["Answer Mask"])
-                # Nothing about this card would change? Leave it completely
-                # alone so "updated" counts only real edits.
-                if (old_q and old_a
-                        and note["Image"] == f'<img src="{img_fname}">'
-                        and note["Header"] == header_prefix
-                        and (not remarks
-                             or _notes_field_val(note) == remarks_html)
-                        and _docs_match(note)
-                        and _media_equals(col, old_q[0], q_svg)
-                        and _media_equals(col, old_a[0], a_svg)):
-                    unchanged += 1
-                    new_note_map[key] = note.id
-                    continue
+                if note is not None:
+                    old_q = _svg_fnames_in(note["Question Mask"])
+                    old_a = _svg_fnames_in(note["Answer Mask"])
+                    # Nothing about this card would change? Leave it completely
+                    # alone so "updated" counts only real edits.
+                    if (old_q and old_a
+                            and note["Image"] == f'<img src="{img_fname}">'
+                            and note["Header"] == header_prefix
+                            and (not remarks
+                                 or _notes_field_val(note) == remarks_html)
+                            and _docs_match(note)
+                            and _media_equals(col, old_q[0], q_svg)
+                            and _media_equals(col, old_a[0], a_svg)):
+                        unchanged += 1
+                        new_note_map[key] = note.id
+                        continue
 
-                q_fname = _save_media(col, q_svg, ".svg")
-                a_fname = _save_media(col, a_svg, ".svg")
-                note["Image"] = f'<img src="{img_fname}">'
-                note["Question Mask"] = f'<img src="{q_fname}">'
-                note["Answer Mask"] = f'<img src="{a_fname}">'
-                note["Header"] = header_prefix
-                _set_notes(note)
-                _set_docs(note)
-                for t in tags:
-                    if t not in note.tags:
-                        note.tags.append(t)
-                col.update_note(note)
-                _trash_media(col, old_q + old_a)
-                updated += 1
-            else:
-                q_fname = _save_media(col, q_svg, ".svg")
-                a_fname = _save_media(col, a_svg, ".svg")
-                note = col.new_note(note_type)
-                note["Image"] = f'<img src="{img_fname}">'
-                note["Question Mask"] = f'<img src="{q_fname}">'
-                note["Answer Mask"] = f'<img src="{a_fname}">'
-                note["Header"] = header_prefix
-                _set_notes(note)
-                _set_docs(note)
-                note.tags.extend(tags)
-                col.add_note(note, deck_id)
-                created += 1
+                    q_fname = _save_media(col, q_svg, ".svg")
+                    a_fname = _save_media(col, a_svg, ".svg")
+                    note["Image"] = f'<img src="{img_fname}">'
+                    note["Question Mask"] = f'<img src="{q_fname}">'
+                    note["Answer Mask"] = f'<img src="{a_fname}">'
+                    note["Header"] = header_prefix
+                    _set_notes(note)
+                    _set_docs(note)
+                    for t in tags:
+                        if t not in note.tags:
+                            note.tags.append(t)
+                    col.update_note(note)
+                    _trash_media(col, old_q + old_a)
+                    updated += 1
+                else:
+                    q_fname = _save_media(col, q_svg, ".svg")
+                    a_fname = _save_media(col, a_svg, ".svg")
+                    note = col.new_note(note_type)
+                    note["Image"] = f'<img src="{img_fname}">'
+                    note["Question Mask"] = f'<img src="{q_fname}">'
+                    note["Answer Mask"] = f'<img src="{a_fname}">'
+                    note["Header"] = header_prefix
+                    _set_notes(note)
+                    _set_docs(note)
+                    note.tags.extend(tags)
+                    col.add_note(note, deck_id)
+                    created += 1
 
-            new_note_map[key] = note.id
+                new_note_map[key] = note.id
+    except Exception as e:
+        # Notes made before the failure must still reach the session, or the
+        # next run creates them a second time.
+        e.partial_maps = ({**note_map, **new_note_map},  # type: ignore[attr-defined]
+                          {**image_map, **new_image_map})
+        raise
 
-    # Pages not part of this run (no boxes left on them) keep their
-    # existing card links and slide images untouched — only a region missing
-    # from a page we actually processed counts as stale.
-    processed = {page_idx for page_idx, _, _ in pages}
+    # Pages not part of this run (no boxes left on them, or not reached
+    # before a cancel) keep their existing card links and slide images
+    # untouched — only a region missing from a page we actually processed
+    # counts as stale.
 
     def _page_of(key: str) -> int:
         try:

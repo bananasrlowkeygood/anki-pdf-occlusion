@@ -1,4 +1,5 @@
 import os
+import traceback
 import uuid
 from typing import Optional
 
@@ -117,6 +118,19 @@ def _centre_inside(rect: tuple, region: tuple) -> bool:
 def _cfg(key, default):
     cfg = mw.addonManager.getConfig(__name__) or {}
     return cfg.get(key, default)
+
+
+def _log_error(report: str) -> str:
+    """Save a traceback to user_files/last_error.txt; returns where it went."""
+    path = os.path.join(os.path.dirname(__file__), "user_files",
+                        "last_error.txt")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(report)
+    except OSError:
+        pass
+    return path
 
 
 def _push_published(hosting: dict, urls: list) -> None:
@@ -1494,10 +1508,10 @@ class PDFOcclusionDialog(QDialog):
         mask_opacity = int(_cfg("mask_opacity", 255))
         highlight_color = tuple(_cfg("highlight_color", [131, 110, 170]))
 
-        grand_total = sum(len(tc) for _, tc, _c in per_doc)
-        progress = QProgressDialog("Creating cards…", None, 0, grand_total, self)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(300)
+        # Everything that can ask a question happens before the progress
+        # dialog opens: a prompt raised under it (e.g. Anki's "this needs a
+        # full sync" when the note type gains fields) sits hidden behind the
+        # modal progress window and the whole thing looks frozen.
 
         # Only when there are boxes: a cloze-only session shouldn't plant
         # the occlusion note type in a collection that has never used it.
@@ -1531,10 +1545,102 @@ class PDFOcclusionDialog(QDialog):
                         unpublished.append(
                             f"{os.path.basename(loc)}: {e.strerror or e}")
 
-        created = updated = unchanged = slides = cloze_made = 0
+        grand_total = sum(len(tc) for _, tc, _c in per_doc)
+        progress = QProgressDialog("Creating cards…", "Cancel", 0, grand_total,
+                                   self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(300)
+
+        created = updated = unchanged = cloze_made = 0
         stale_nids: list[int] = list(self._cloze_stale)
+        canceled = False
+        error = ""
+        try:
+            created, updated, unchanged, cloze_made, canceled = (
+                self._create_notes(per_doc, progress, deck_id, note_type,
+                                   cloze_type, links, mode, mask_color,
+                                   mask_opacity, highlight_color, stale_nids))
+        except Exception:
+            error = traceback.format_exc()
+        finally:
+            # without this an error left the modal progress window up for good
+            progress.close()
+
+        # The records now know their note ids. Get that to disk before
+        # anything else can go wrong — losing it would mean creating every
+        # one of these notes a second time on the next run.
+        self._persist_sessions()
+
+        if error:
+            log = _log_error(error)
+            mw.reset()
+            showWarning(
+                "Creating cards stopped with an error. Cards made before it "
+                "are kept.\n\n"
+                f"{error.strip().splitlines()[-1]}\n\n"
+                f"The full report is in {log}. Please include it if you "
+                "report this.",
+                parent=self, title="PDF Occlusion",
+            )
+            return
+
+        deleted = 0
+        if stale_nids and not canceled and askUser(
+            f"Delete {len(stale_nids)} note(s) whose boxes or cloze cards "
+            "were removed?",
+            parent=self, title="PDF Occlusion",
+        ):
+            mw.col.remove_notes(stale_nids)
+            deleted = len(stale_nids)
+        if not canceled:
+            self._cloze_stale = []
+
+        mw.col.reset()
+        mw.reset()
+        self._persist_sessions()
+
+        bits = []
+        if created:
+            bits.append(f"{created} created")
+        if updated:
+            bits.append(f"{updated} updated")
+        if deleted:
+            bits.append(f"{deleted} deleted")
+        if not bits:
+            msg = (f"All {unchanged} card{'s' if unchanged != 1 else ''} "
+                   "already up to date.")
+        else:
+            if unchanged:
+                bits.append(f"{unchanged} unchanged")
+            msg = "Cards: " + ", ".join(bits) + "."
+        if canceled:
+            msg = ("Stopped early. Create All Cards again to finish the "
+                   "rest.\n\n" + msg)
+        if cloze_made:
+            msg += f"\n\n{cloze_made} of them cloze."
+        if unpublished:
+            msg += ("\n\nCouldn't publish these, so their buttons only work "
+                    "on this computer:\n" + "\n".join(unpublished))
+
+        # Started before the summary so it runs while that's being read.
+        if hosting and hosting["git_push"]:
+            _push_published(hosting, [u for u in links.values()
+                                      if pdf_hosting.is_url(u)])
+        showInfo(msg, parent=self)
+        if _cfg("close_after_creating", True) and not canceled:
+            self.accept()
+
+    def _create_notes(self, per_doc, progress, deck_id, note_type, cloze_type,
+                      links, mode, mask_color, mask_opacity, highlight_color,
+                      stale_nids):
+        """The writing half of _create_cards. Appends to stale_nids and
+        returns (created, updated, unchanged, cloze_made, canceled)."""
+        created = updated = unchanged = cloze_made = 0
+        canceled = False
         offset = 0
         for doc, to_create, cloze in per_doc:
+            if canceled:
+                break
             start, count = doc["start"], doc["count"]
             local_modes = {
                 str(i - start): m for i, m in self._page_modes.items()
@@ -1542,40 +1648,48 @@ class PDFOcclusionDialog(QDialog):
             }
 
             def on_progress(done: int, total: int, _off=offset):
-                progress.setValue(_off + done)
+                nonlocal canceled
                 mw.app.processEvents()
+                canceled = canceled or progress.wasCanceled()
+                if not canceled:
+                    progress.setValue(_off + done)
+                return not canceled
 
             result = {"created": 0, "updated": 0, "unchanged": 0,
                       "note_map": doc.get("note_map", {}),
                       "image_map": doc.get("image_map", {}),
                       "stale_nids": []}
             if to_create:
-                result = create_occlusion_notes(
-                    mw.col, deck_id, note_type, to_create,
-                    mask_color=mask_color,
-                    mask_opacity=mask_opacity,
-                    highlight_color=highlight_color,
-                    lecture_name=doc["lecture"],
-                    total_slides=count,
-                    slides_pdf=links.get(doc["path"], doc["path"]),
-                    notes_pdf=links.get(doc.get("notes_pdf", ""),
-                                        doc.get("notes_pdf", "")),
-                    default_mode=mode,
-                    page_modes=local_modes,
-                    note_map=doc.get("note_map"),
-                    image_map=doc.get("image_map"),
-                    on_progress=on_progress,
-                )
+                try:
+                    result = create_occlusion_notes(
+                        mw.col, deck_id, note_type, to_create,
+                        mask_color=mask_color,
+                        mask_opacity=mask_opacity,
+                        highlight_color=highlight_color,
+                        lecture_name=doc["lecture"],
+                        total_slides=count,
+                        slides_pdf=links.get(doc["path"], doc["path"]),
+                        notes_pdf=links.get(doc.get("notes_pdf", ""),
+                                            doc.get("notes_pdf", "")),
+                        default_mode=mode,
+                        page_modes=local_modes,
+                        note_map=doc.get("note_map"),
+                        image_map=doc.get("image_map"),
+                        on_progress=on_progress,
+                    )
+                except Exception as e:
+                    if hasattr(e, "partial_maps"):
+                        doc["note_map"], doc["image_map"] = e.partial_maps
+                    raise
             doc["note_map"] = result["note_map"]
             doc["image_map"] = result["image_map"]
             created += result["created"]
             updated += result["updated"]
             unchanged += result["unchanged"]
             stale_nids += result["stale_nids"]
-            slides += len(to_create)
             offset += len(to_create)
 
-            if cloze and cloze_type is not None:
+            if cloze and cloze_type is not None and not canceled is not None:
                 def caption_for(local, _doc=doc, _count=count):
                     label = f"Slide {local + 1}/{_count}"
                     lecture = (_doc.get("lecture") or "").strip()
@@ -1602,51 +1716,4 @@ class PDFOcclusionDialog(QDialog):
                 unchanged += cres["unchanged"]
                 cloze_made += cres["created"] + cres["updated"]
 
-        progress.close()
-
-        # The records now know their note ids. Get that to disk before
-        # anything else can go wrong — losing it would mean creating every
-        # one of these notes a second time on the next run.
-        self._persist_sessions()
-
-        deleted = 0
-        if stale_nids and askUser(
-            f"Delete {len(stale_nids)} note(s) whose boxes or cloze cards "
-            "were removed?",
-            title="PDF Occlusion",
-        ):
-            mw.col.remove_notes(stale_nids)
-            deleted = len(stale_nids)
-        self._cloze_stale = []
-
-        mw.col.reset()
-        mw.reset()
-        self._persist_sessions()
-
-        bits = []
-        if created:
-            bits.append(f"{created} created")
-        if updated:
-            bits.append(f"{updated} updated")
-        if deleted:
-            bits.append(f"{deleted} deleted")
-        if not bits:
-            msg = (f"All {unchanged} card{'s' if unchanged != 1 else ''} "
-                   "already up to date.")
-        else:
-            if unchanged:
-                bits.append(f"{unchanged} unchanged")
-            msg = "Cards: " + ", ".join(bits) + "."
-        if cloze_made:
-            msg += f"\n\n{cloze_made} of them cloze."
-        if unpublished:
-            msg += ("\n\nCouldn't publish these, so their buttons only work "
-                    "on this computer:\n" + "\n".join(unpublished))
-
-        # Started before the summary so it runs while that's being read.
-        if hosting and hosting["git_push"]:
-            _push_published(hosting, [u for u in links.values()
-                                      if pdf_hosting.is_url(u)])
-        showInfo(msg)
-        if _cfg("close_after_creating", True):
-            self.accept()
+        return created, updated, unchanged, cloze_made, canceled
